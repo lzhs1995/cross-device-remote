@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.bak*
+.DS_Store
+.venv/
+.env
+.env.*
+config.json
+agent2.json
+secret
+state/
+wbagent-state/
+results/
+*.log
+*.backup-*
+.pytest_cache/

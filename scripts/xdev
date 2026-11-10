@@ -1,0 +1,4 @@
+#!/bin/sh
+# xdev 入口：解析符号链接后调用同目录的 xdev.py（skill 被链接进 ~/.claude/skills 等目录时也能找到）
+here=$(cd "$(dirname "$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")")" && pwd)
+exec python3 -B "$here/xdev.py" "$@"

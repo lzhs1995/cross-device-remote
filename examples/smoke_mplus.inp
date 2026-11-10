@@ -1,0 +1,5 @@
+TITLE: xdev Mplus smoke test (synthetic data, n = 300);
+DATA: FILE = smoke_mplus.dat;
+VARIABLE: NAMES = y x1 x2;
+MODEL: y ON x1 x2;
+OUTPUT: SAMPSTAT;

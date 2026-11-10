@@ -1,0 +1,13 @@
+{
+  "state_dir": "~/.local/state/cross-device-remote",
+  "port": 18092,
+  "serve_args": ["--host", "127.0.0.1", "--port", "18092", "--allow-ip", "127.0.0.1/32",
+                 "--require-signed-poll", "--ttl", "86400"],
+  "windows": {
+    "agent_state": "%LOCALAPPDATA%\\XdevAgent",
+    "work_root": "%LOCALAPPDATA%\\xdev",
+    "search_roots": ["%ProgramFiles%", "%ProgramFiles(x86)%", "%LOCALAPPDATA%\\Programs", "%USERPROFILE%\\Downloads"],
+    "rscript": "",
+    "mplus": ""
+  }
+}

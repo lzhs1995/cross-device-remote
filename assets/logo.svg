@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="300" viewBox="0 0 1120 300" role="img" aria-labelledby="title desc">
+<title id="title">cross-device-remote</title><desc id="desc">Two connected computer screens: develop on Mac, execute on Windows.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0f172a"/><stop offset="1" stop-color="#12384b"/></linearGradient><linearGradient id="link" x2="1"><stop stop-color="#67e8f9"/><stop offset="1" stop-color="#6ee7b7"/></linearGradient></defs>
+<rect width="1120" height="300" rx="28" fill="url(#bg)"/>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+<rect x="55" y="92" width="118" height="79" rx="9" stroke="#67e8f9"/><path d="M40 187h148l-12 14H53Z" stroke="#67e8f9"/>
+<rect x="250" y="92" width="118" height="79" rx="9" stroke="#6ee7b7"/><path d="M309 172v27m-26 0h52" stroke="#6ee7b7"/>
+<path d="M184 122h52m-12-11 12 11-12 11m12 23h-52m12-11-12 11 12 11" stroke="url(#link)"/>
+</g>
+<text x="414" y="137" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="47" font-weight="700" fill="#f8fafc">cross-device-remote</text>
+<text x="417" y="183" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="23" fill="#cbd5e1">Develop on Mac. Execute on Windows. Keep the evidence.</text>
+<text x="417" y="224" font-family="ui-monospace,monospace" font-size="17" fill="#67e8f9">xdev · Tailscale · PowerShell · RStudio / ClaudeR</text>
+</svg>
