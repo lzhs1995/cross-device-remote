@@ -1,5 +1,6 @@
 """Windows 5.1 集成测试：临时私有状态、回环签名协议；绝不调用 Mplus 或现役 worker。"""
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -194,6 +195,64 @@ class WindowsWorkerTests(unittest.TestCase):
             "-SecretFile", str(self.worker_state / "secret"), "-State", str(destination)], capture_output=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(destination.exists())
+
+    def test_windows_installer_fresh_local_state(self):
+        # 先停本测试自己的 worker，原测试状态随后必须逐件不变。
+        self.stop_worker()
+
+        def snapshot(directory):
+            return {str(p.relative_to(directory)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in directory.rglob("*") if p.is_file()}
+
+        original = snapshot(self.worker_state)
+        source_before = snapshot(SOURCE / "windows")
+        destination = self.root / "fresh-install"
+        result = subprocess.run([str(POWERSHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", str(SOURCE / "windows/install.ps1"), "-Server", self.url + "/",
+            "-SecretFile", str(self.worker_state / "secret"), "-State", str(destination)],
+            capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(self.key, result.stdout + result.stderr)
+        receipt = json.loads(result.stdout.strip())
+        self.assertEqual(receipt["status"], "XDEV_WINDOWS_INSTALLED")
+        self.assertFalse(receipt["started"])
+        self.assertFalse(receipt["auto_start"])
+        self.assertFalse(receipt["secret_printed"])
+        expected = {"agent2.json", "secret", "wbagent-agent2.ps1", "watchdog.ps1", "start.vbs"}
+        self.assertEqual({p.name for p in destination.iterdir()}, expected)
+        for name in ("wbagent-agent2.ps1", "watchdog.ps1", "start.vbs"):
+            self.assertEqual((destination / name).read_bytes(), (SOURCE / "windows" / name).read_bytes())
+        self.assertEqual((destination / "secret").read_text(encoding="utf-8"), self.key)
+        config = json.loads((destination / "agent2.json").read_text(encoding="utf-8"))
+        self.assertEqual(Path(config["state"]), destination)
+        self.assertEqual(Path(config["secret_file"]), destination / "secret")
+        self.assertNotIn("secret", config)
+        self.assertEqual(config["servers"], [self.url])
+        paths = ",".join(self.quote(p) for p in (destination, destination / "secret", destination / "agent2.json"))
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$entries = @(foreach ($p in @(__PATHS__)) {
+  $acl = Get-Acl -LiteralPath $p
+  $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
+    @{sid=$_.IdentityReference.Value;kind=[string]$_.AccessControlType;rights=[string]$_.FileSystemRights}
+  })
+  @{path=$p;protected=$acl.AreAccessRulesProtected;rules=$rules}
+})
+@{user_sid=$sid;entries=$entries} | ConvertTo-Json -Depth 6 -Compress
+""".replace("__PATHS__", paths)
+        acl_result = subprocess.run([str(POWERSHELL), "-NoProfile", "-NonInteractive", "-Command", script],
+                                    capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(acl_result.returncode, 0, acl_result.stderr)
+        acl_receipt = json.loads(acl_result.stdout)
+        allowed = {acl_receipt["user_sid"], "S-1-5-18"}
+        self.assertTrue(acl_receipt["entries"][0]["protected"])
+        for entry in acl_receipt["entries"]:
+            rules = entry["rules"]
+            self.assertEqual({r["sid"] for r in rules}, allowed)
+            self.assertTrue(all(r["kind"] == "Allow" and "FullControl" in r["rights"] for r in rules))
+        self.assertEqual(snapshot(self.worker_state), original)
+        self.assertEqual(snapshot(SOURCE / "windows"), source_before)
 
     def test_malformed_legacy_cursor_fails_closed_without_dispatch(self):
         self.stop_worker()
