@@ -18,6 +18,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/check.py
+        if: runner.os != 'Windows'
+      - run: python scripts/check.py
+        if: runner.os == 'Windows'
+        shell: powershell
       - run: python scripts/check_public.py --history
       - name: Parse Windows PowerShell sources
         if: runner.os == 'Windows'

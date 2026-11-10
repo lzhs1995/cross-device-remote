@@ -234,7 +234,12 @@ class WindowsWorkerTests(unittest.TestCase):
 $ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $entries = @(foreach ($p in @(__PATHS__)) {
-  $acl = Get-Acl -LiteralPath $p
+  # 直接读 .NET Framework DACL，避免继承的 PSModulePath 影响模块自动加载。
+  $acl = if ([IO.Directory]::Exists($p)) {
+    [IO.Directory]::GetAccessControl($p)
+  } else {
+    [IO.File]::GetAccessControl($p)
+  }
   $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
     @{sid=$_.IdentityReference.Value;kind=[string]$_.AccessControlType;rights=[string]$_.FileSystemRights}
   })
