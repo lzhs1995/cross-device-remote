@@ -31,7 +31,8 @@ if ($AutoStart) {
 New-Item -ItemType Directory -Path $State | Out-Null
 # 設定及結果只允許目前使用者與 SYSTEM 存取。
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-& icacls.exe $State /inheritance:r /grant:r "${sid}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' | Out-Null
+# icacls 數字 SID 必須加 *；SYSTEM 也用固定 SID，避免依賴系統語言。
+& icacls.exe $State /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not restrict state-directory ACL; no worker was started.' }
 $secretTarget = Join-Path $State 'secret'
 [IO.File]::WriteAllText($secretTarget, $pairing, (New-Object Text.UTF8Encoding($false)))
