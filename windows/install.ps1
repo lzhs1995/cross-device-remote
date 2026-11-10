@@ -29,11 +29,19 @@ if ($AutoStart) {
   }
 }
 New-Item -ItemType Directory -Path $State | Out-Null
-# 設定及結果只允許目前使用者與 SYSTEM 存取。
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-# icacls 數字 SID 必須加 *；SYSTEM 也用固定 SID，避免依賴系統語言。
-& icacls.exe $State /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Could not restrict state-directory ACL; no worker was started.' }
+# 從空 DACL 建立，不能只停用繼承而保留既有的 OWNER RIGHTS/Admin 顯式規則。
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$principals = @($sid, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
+$directoryAcl = [Security.AccessControl.DirectorySecurity]::new()
+$directoryAcl.SetAccessRuleProtection($true, $false)
+$inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+foreach ($identity in $principals) {
+  $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity,
+    [Security.AccessControl.FileSystemRights]::FullControl, $inheritance,
+    [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+  $directoryAcl.AddAccessRule($rule)
+}
+[IO.Directory]::SetAccessControl($State, $directoryAcl)
 $secretTarget = Join-Path $State 'secret'
 [IO.File]::WriteAllText($secretTarget, $pairing, (New-Object Text.UTF8Encoding($false)))
 $pairing = $null
@@ -42,6 +50,17 @@ foreach ($file in @('wbagent-agent2.ps1','watchdog.ps1','start.vbs')) {
 }
 $cfg = @{state=$State;secret_file=$secretTarget;servers=@($origins);rendezvous=@();mutex='Local\XdevAgentV1'}
 [IO.File]::WriteAllText((Join-Path $State 'agent2.json'), ($cfg | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
+# 複製來源可能附帶顯式 ACE；所有新檔也重建為兩個 SID 的受保護 DACL。
+foreach ($file in @('secret','agent2.json','wbagent-agent2.ps1','watchdog.ps1','start.vbs')) {
+  $fileAcl = [Security.AccessControl.FileSecurity]::new()
+  $fileAcl.SetAccessRuleProtection($true, $false)
+  foreach ($identity in $principals) {
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new($identity,
+      [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
+    $fileAcl.AddAccessRule($rule)
+  }
+  [IO.File]::SetAccessControl((Join-Path $State $file), $fileAcl)
+}
 if ($AutoStart) {
   $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
   $vbs = Join-Path $State 'start.vbs'
