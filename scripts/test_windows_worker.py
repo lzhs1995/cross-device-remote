@@ -224,8 +224,9 @@ class WindowsWorkerTests(unittest.TestCase):
             self.assertEqual((destination / name).read_bytes(), (SOURCE / "windows" / name).read_bytes())
         self.assertEqual((destination / "secret").read_text(encoding="utf-8"), self.key)
         config = json.loads((destination / "agent2.json").read_text(encoding="utf-8"))
-        self.assertEqual(Path(config["state"]), destination)
-        self.assertEqual(Path(config["secret_file"]), destination / "secret")
+        # Windows 临时路径可能是 RUNNER~1，安装器会保存同一目录的长路径。
+        self.assertTrue(Path(config["state"]).samefile(destination))
+        self.assertTrue(Path(config["secret_file"]).samefile(destination / "secret"))
         self.assertNotIn("secret", config)
         self.assertEqual(config["servers"], [self.url])
         paths = ",".join(self.quote(p) for p in (destination, destination / "secret", destination / "agent2.json"))

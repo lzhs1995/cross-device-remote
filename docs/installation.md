@@ -99,6 +99,30 @@ Before scientific work, follow the [RStudio recipe](../recipes/windows-rstudio-c
 
 `python3 scripts/check.py` is the local check entry. `scripts/selftest.sh` is a connected test that can write synthetic files and create remote jobs; read it and reserve a test window first. See [validation boundaries](validation.md).
 
+## Uninstall without discarding recovery state
+
+1. Stop new submissions and reach a safe boundary: confirm this installation has no in-flight commands, detached work, or RStudio/engine jobs. Preserve all request IDs, budgets and results. If the Mac service is shared, coordinate with its other owners before stopping it.
+2. On Windows, verify that the installed `XdevAgentLogon` and `XdevAgentWatchdog` task actions point to **this installation's** `start.vbs`. At the safe boundary, create a `STOP` file in its own state directory (use the original `-State` path if customized), then wait for a newly appended `WBAGENT_V2 stop` log entry and the matching worker process to exit. The watchdog honors this file. Do not force-stop another worker or treat an old log entry as a fresh stop.
+
+   ```powershell
+   $xdevState = Join-Path $env:LOCALAPPDATA 'XdevAgent'
+   Get-ScheduledTask -TaskName XdevAgentLogon,XdevAgentWatchdog -ErrorAction SilentlyContinue | Format-List TaskName,Actions
+   # After verifying ownership and that no work remains:
+   New-Item -ItemType File -Path (Join-Path $xdevState 'STOP') -Force | Out-Null
+   ```
+
+3. After the worker has stopped, unregister only the verified tasks that this installation created. If `-AutoStart` was not used, they may not exist. Leave legacy `StataWorkbenchAgent` / `WbAgentWatchdog` tasks and other owners' tasks untouched.
+
+   ```powershell
+   # Run only for each existing task whose action was verified above.
+   Unregister-ScheduledTask -TaskName XdevAgentLogon -Confirm:$false
+   Unregister-ScheduledTask -TaskName XdevAgentWatchdog -Confirm:$false
+   ```
+
+4. On the Mac, inspect each skill entry listed above. Remove a link only if it is a symlink and its resolved target is still this checkout; remove the verified agent links before the shared link so resolution remains meaningful. Leave ordinary directories and links pointing elsewhere untouched. If retiring this installation's Mac service too, use the same no-work boundary and its own state-directory `STOP` file, then verify its exit.
+
+Keep private `config.json`, both devices' state directories, pairing secrets, original attempts, budgets and result files. Uninstalling links or tasks does not require deleting them. Retention or deletion is a separate user decision. Resume from the retained state through its original recovery procedure rather than initializing a new queue over it.
+
 ## Official Tailscale references
 
 - [Install Tailscale](https://tailscale.com/kb/1017/install)

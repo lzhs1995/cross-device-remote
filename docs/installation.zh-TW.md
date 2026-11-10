@@ -99,6 +99,30 @@ xdev run -c '[Environment]::MachineName; [DateTime]::UtcNow.ToString("o")' --tim
 
 `python3 scripts/check.py` 是本機檢查入口。`scripts/selftest.sh` 為連線測試，可能寫合成檔案及建立遠端工作；先閱讀內容並取得測試窗口。詳見 [驗收邊界](validation.zh-TW.md)。
 
+## 卸載但保留恢復狀態
+
+1. 停止新增提交，並到達安全邊界：確認本安裝沒有在途命令、背景工作或 RStudio／引擎作業。保留全部請求 ID、預算與結果。若 Mac 服務為共用，先和其他擁有者協調再停止。
+2. 在 Windows 核對 `XdevAgentLogon` 與 `XdevAgentWatchdog` 排程的 action 確實指向**本安裝**的 `start.vbs`。到達安全邊界後，在自身 state 目錄建立 `STOP`（自訂安裝需使用原 `-State` 路徑），等待記錄新增 `WBAGENT_V2 stop` 且對應 worker 程序退出。watchdog 會遵守此檔案；不要強停其他 worker，也不要把舊記錄當成本次已停止。
+
+   ```powershell
+   $xdevState = Join-Path $env:LOCALAPPDATA 'XdevAgent'
+   Get-ScheduledTask -TaskName XdevAgentLogon,XdevAgentWatchdog -ErrorAction SilentlyContinue | Format-List TaskName,Actions
+   # 核對所有權，且確認已無工作後：
+   New-Item -ItemType File -Path (Join-Path $xdevState 'STOP') -Force | Out-Null
+   ```
+
+3. worker 停止後，只取消已核對且由本安裝建立的兩個排程。未使用 `-AutoStart` 時可能不存在；現役舊 `StataWorkbenchAgent`／`WbAgentWatchdog` 與他方排程一律保留。
+
+   ```powershell
+   # 僅針對確實存在、且 action 已於上一步核對的任務執行。
+   Unregister-ScheduledTask -TaskName XdevAgentLogon -Confirm:$false
+   Unregister-ScheduledTask -TaskName XdevAgentWatchdog -Confirm:$false
+   ```
+
+4. 在 Mac 逐一核對上列 skill 入口：只有在它是符號連結、且解析後仍指向本 checkout 時才移除。先移除已核對的 agent 連結，再移除共用連結，確保核對時仍能正確解析。一般目錄與指向別處的連結不動。若也停用本安裝的 Mac 服務，沿同一無工作安全邊界，在它自身 state 目錄建立 `STOP`，再核對退出。
+
+保留私有 `config.json`、兩端 state、配對密鑰、原嘗試、預算及結果檔。卸載連結或排程不需要刪除這些資料；保留或刪除是另一項使用者決定。需要恢復時，沿保留狀態的原恢復程序接續，不初始化新佇列覆蓋它。
+
 ## Tailscale 官方參考
 
 - [安裝 Tailscale](https://tailscale.com/kb/1017/install)
