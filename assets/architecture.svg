@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
-<title id="title">Mac development and Windows execution</title><desc id="desc">A Mac agent uses xdev and a private Tailscale path. The Windows agent polls the Mac server, then calls Windows loopback ClaudeR in RStudio. R and MplusAutomation run Mplus. Durable receipts and selected result files return to the Mac.</desc>
-<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#2563eb"/></marker></defs>
+<title id="title">Mac development and Windows execution</title><desc id="desc">A Mac agent uses xdev and a private Tailscale path. The Windows worker polls the Mac server, then calls Windows loopback ClaudeR in RStudio. R and MplusAutomation run Mplus. Durable receipts and selected result files return to the Mac.</desc>
+
 <rect width="1200" height="500" rx="20" fill="#f8fafc"/>
 <text x="40" y="45" font-family="system-ui,sans-serif" font-size="24" font-weight="700" fill="#0f172a">One scientific script. Two agent locations.</text>
 <rect x="28" y="74" width="246" height="318" rx="18" fill="#e0f2fe" stroke="#0284c7"/>
@@ -9,20 +9,21 @@
 <text x="68" y="168" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">Agent + xdev CLI</text><text x="68" y="194" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Edit · review · inspect</text>
 <rect x="48" y="260" width="206" height="81" rx="12" fill="white"/>
 <text x="68" y="291" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">Control server</text><text x="68" y="318" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Signed requests / receipts</text>
-<path d="M150 215v36" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow)"/>
+<path d="M150 215v36" stroke="#2563eb" stroke-width="3"/>
 <rect x="420" y="74" width="752" height="318" rx="18" fill="#ecfdf5" stroke="#059669"/>
 <text x="442" y="112" font-family="system-ui,sans-serif" font-size="22" font-weight="700" fill="#065f46">Windows — installed software and local data</text>
 <rect x="443" y="160" width="196" height="110" rx="12" fill="white"/>
-<text x="462" y="193" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">Windows agent</text><text x="462" y="223" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Poll · execute · return</text><text x="462" y="247" font-family="system-ui,sans-serif" font-size="15" fill="#475569">User-level PowerShell</text>
+<text x="462" y="193" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">Windows worker</text><text x="462" y="223" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Poll · execute · return</text><text x="462" y="247" font-family="system-ui,sans-serif" font-size="15" fill="#475569">User-level PowerShell</text>
 <rect x="670" y="160" width="216" height="110" rx="12" fill="white"/>
 <text x="689" y="193" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">RStudio + ClaudeR</text><text x="689" y="223" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Windows loopback only</text><text x="689" y="247" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Verified session / async R</text>
 <rect x="917" y="160" width="230" height="110" rx="12" fill="white"/>
 <text x="935" y="193" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">MplusAutomation</text><text x="935" y="223" font-family="system-ui,sans-serif" font-size="17" fill="#0f172a">→ Mplus</text><text x="935" y="247" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Original scientific script</text>
-<path d="M640 208h23m224 0h23" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow)"/>
-<path d="M439 286H278" stroke="#2563eb" stroke-width="3" marker-end="url(#arrow)"/>
-<text x="287" y="184" font-family="system-ui,sans-serif" font-size="16" fill="#0f172a">Private Tailscale</text><text x="290" y="209" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Windows polls Mac</text><text x="299" y="316" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Signed messages</text>
+<path d="M640 208h23" stroke="#2563eb" stroke-width="3"/><path d="M887 208h23" stroke="#2563eb" stroke-width="3"/>
+<path d="M439 286H278" stroke="#2563eb" stroke-width="3"/>
+<text x="287" y="184" font-family="system-ui,sans-serif" font-size="16" fill="#0f172a">Private Tailscale</text><text x="292" y="209" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Windows polls</text><text x="314" y="232" font-family="system-ui,sans-serif" font-size="15" fill="#475569">the Mac</text><text x="294" y="316" font-family="system-ui,sans-serif" font-size="15" fill="#475569">Signed traffic</text>
 <text x="450" y="322" font-family="system-ui,sans-serif" font-size="17" fill="#065f46">Durable jobs · bounded budgets · selected result-only exports</text>
 <text x="450" y="351" font-family="system-ui,sans-serif" font-size="15" fill="#475569">A Windows-local agent can enter at ClaudeR and use the same R script.</text>
 <text x="40" y="437" font-family="system-ui,sans-serif" font-size="18" fill="#0f172a">Network reachability ≠ command success ≠ model acceptance.</text>
 <text x="40" y="470" font-family="system-ui,sans-serif" font-size="16" fill="#475569">Keep original request IDs. Reconcile unknown outcomes before creating new work.</text>
+<g fill="#2563eb"><path d="M144 243 150 251 156 243Z"/><path d="M655 202 663 208 655 214Z"/><path d="M902 202 910 208 902 214Z"/><path d="M286 280 278 286 286 292Z"/></g>
 </svg>

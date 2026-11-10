@@ -41,7 +41,7 @@ class InstallerTests(unittest.TestCase):
             link = self.home / base / "cross-device-remote"
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), SOURCE)
-        config = json.loads(self.config().read_text())
+        config = json.loads(self.config().read_text(encoding="utf-8"))
         self.assertEqual(config["state_dir"], str(self.home / ".local/state/cross-device-remote"))
         self.assertEqual(config["serve_args"][config["serve_args"].index("--host") + 1], "127.0.0.1")
         self.assertFalse(receipt["services_started"])
@@ -62,11 +62,11 @@ class InstallerTests(unittest.TestCase):
     def test_conflict_refuses_before_installing_other_links(self):
         conflict = self.home / ".codex/skills/cross-device-remote"
         conflict.mkdir(parents=True)
-        (conflict / "owned.txt").write_text("preserve")
+        (conflict / "owned.txt").write_text("preserve", encoding="utf-8")
         result = self.invoke("--agents", "codex", "claude")
         self.assertEqual(result.returncode, 2)
         self.assertIn("XDEV_INSTALL_REFUSED", result.stderr)
-        self.assertEqual((conflict / "owned.txt").read_text(), "preserve")
+        self.assertEqual((conflict / "owned.txt").read_text(encoding="utf-8"), "preserve")
         self.assertFalse((self.home / ".agents").exists())
         self.assertFalse((self.home / ".claude").exists())
         self.assertFalse(self.config().exists())
@@ -92,11 +92,11 @@ class InstallerTests(unittest.TestCase):
     def test_check_conflict_reports_mismatch_without_replacement(self):
         conflict = self.home / ".codex/skills/cross-device-remote"
         conflict.mkdir(parents=True)
-        (conflict / "owned.txt").write_text("preserve")
+        (conflict / "owned.txt").write_text("preserve", encoding="utf-8")
         result = self.invoke("--check", "--replace", "--agents", "codex")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertFalse(json.loads(result.stdout)["ok"])
-        self.assertEqual((conflict / "owned.txt").read_text(), "preserve")
+        self.assertEqual((conflict / "owned.txt").read_text(encoding="utf-8"), "preserve")
         self.assertFalse((self.home / ".agents").exists())
 
     def test_dangling_private_config_symlink_is_preserved(self):

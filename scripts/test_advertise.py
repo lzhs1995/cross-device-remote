@@ -4,7 +4,7 @@ from pathlib import Path
 
 state = Path(tempfile.mkdtemp(prefix="xdev-adv-"))
 (state / "queue").mkdir(); (state / "results").mkdir()
-(state / "secret").write_text("selftest-secret\n")
+(state / "secret").write_text("selftest-secret\n", encoding="utf-8")
 os.environ["WBAGENT_STATE"] = str(state)
 spec = importlib.util.spec_from_file_location("wbagent", Path(__file__).resolve().with_name("wbagent.py"))
 wb = importlib.util.module_from_spec(spec); spec.loader.exec_module(wb)
@@ -27,6 +27,6 @@ published.clear()
 run(["--host", "127.0.0.1", "--port", "0", "--allow-ip", "127.0.0.1/32", "--rendezvous-gist", "FAKE", "--ttl", "1"])
 ip, _ = wb.lan_address()
 assert published == ([("FAKE", f"http://{ip}:0")] if ip else []), (published, ip)
-log = (state / "server.log").read_text()
+log = (state / "server.log").read_text(encoding="utf-8")
 assert "advertise=192.0.2.10" in log and "advertise=en0" in log and log.count("SERVE_END") == 2, log
 print("ADVERTISE_SELFTEST PASS", published, "state", state)

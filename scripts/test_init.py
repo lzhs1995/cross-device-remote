@@ -22,7 +22,7 @@ class InitTests(unittest.TestCase):
     def test_default_init_creates_private_secret_without_display(self):
         result = self.invoke()
         secret_file = self.root / "secret"
-        secret = secret_file.read_text().strip()
+        secret = secret_file.read_text(encoding="utf-8").strip()
         self.assertRegex(secret, r"^[a-f0-9]{32}$")
         self.assertNotIn(secret, result.stdout + result.stderr)
         self.assertIn("WBAGENT_INITIALIZED", result.stdout)
@@ -31,10 +31,10 @@ class InitTests(unittest.TestCase):
 
     def test_show_secret_is_explicit_and_preserves_existing_pairing(self):
         self.invoke()
-        secret = (self.root / "secret").read_text()
+        secret = (self.root / "secret").read_text(encoding="utf-8")
         result = self.invoke("--show-secret")
         self.assertEqual(result.stdout, secret)
-        self.assertEqual((self.root / "secret").read_text(), secret)
+        self.assertEqual((self.root / "secret").read_text(encoding="utf-8"), secret)
         self.assertEqual(result.stderr, "")
 
     def test_repeated_default_init_neither_displays_nor_rotates_secret(self):

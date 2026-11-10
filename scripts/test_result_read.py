@@ -17,7 +17,7 @@ SOURCE = None
 
 class ReaderTests(unittest.TestCase):
     def test_json_string_line_separators_preserved_in_emitted_rows(self):
-        tree = ast.parse(SOURCE.read_text())
+        tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "emitted")
         environment = {"json": json}
         exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), environment)
@@ -51,7 +51,7 @@ class ReaderTests(unittest.TestCase):
                            "time": types.SimpleNamespace(time=lambda: state["clock"],
                                                          monotonic=lambda: state["clock"], sleep=sleep),
                            "wbagent": types.SimpleNamespace(enqueue=enqueue)}
-            tree = ast.parse(SOURCE.read_text())
+            tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
             function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_ps")
             exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), environment)
             capture = io.StringIO()

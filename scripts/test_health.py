@@ -29,12 +29,12 @@ class HealthTests(unittest.TestCase):
             spec.loader.exec_module(self.client)
 
     def state(self, age=5, cursor=11, jobs=(10, 12, 13), dispatched=(10, 12), completed=()):
-        (self.root / "last_seen").write_text(f"{self.NOW - age} after={cursor} peer=192.0.2.30\n")
+        (self.root / "last_seen").write_text(f"{self.NOW - age} after={cursor} peer=192.0.2.30\n", encoding="utf-8")
         for job in jobs:
-            (self.root / "queue" / f"{job}.json").write_text('{}\n')
+            (self.root / "queue" / f"{job}.json").write_text('{}\n', encoding="utf-8")
         for job in completed:
-            (self.root / "results" / f"{job}.json").write_text('{"rc":0}\n')
-        (self.root / "server.log").write_text("".join(f"2000-01-01T00:00:00Z DISPATCH id={job}\n" for job in dispatched))
+            (self.root / "results" / f"{job}.json").write_text('{"rc":0}\n', encoding="utf-8")
+        (self.root / "server.log").write_text("".join(f"2000-01-01T00:00:00Z DISPATCH id={job}\n" for job in dispatched), encoding="utf-8")
 
     def call(self, pids=("123",)):
         before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
@@ -84,7 +84,7 @@ class HealthTests(unittest.TestCase):
                 if value is None:
                     seen.unlink(missing_ok=True)
                 else:
-                    seen.write_text(value)
+                    seen.write_text(value, encoding="utf-8")
                 rc, out = self.call()
                 self.assertEqual(rc, 3)
                 self.assertIn("AGENT_STALE", out)
@@ -95,7 +95,7 @@ class HealthTests(unittest.TestCase):
 
     def test_legacy_poll_without_cursor_does_not_guess_history(self):
         self.state()
-        (self.root / "last_seen").write_text(f"{self.NOW} peer=192.0.2.30\n")
+        (self.root / "last_seen").write_text(f"{self.NOW} peer=192.0.2.30\n", encoding="utf-8")
         rc, out = self.call()
         self.assertEqual(rc, 0)
         self.assertIn("historical_unknown -", out)

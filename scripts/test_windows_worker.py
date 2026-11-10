@@ -144,10 +144,10 @@ class WindowsWorkerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stdout + result.stderr + self.diagnostics())
         self.assertIn("中文 — pairing", result.stdout)
         self.assertIn("錯誤", result.stderr)
-        self.assertEqual((self.worker_state / "server.txt").read_text().strip(), self.url)
+        self.assertEqual((self.worker_state / "server.txt").read_text(encoding="utf-8").strip(), self.url)
         self.assertNotIn(self.key, result.stdout + result.stderr + self.diagnostics())
         local = self.until(lambda: next(iter(self.worker_state.glob("result-*.json")), None))
-        self.assertEqual(json.loads(local.read_text())["rc"], 7)
+        self.assertEqual(json.loads(local.read_text(encoding="utf-8"))["rc"], 7)
 
     def test_timeout_returns_124_and_leaves_result_record(self):
         job = self.enqueue("Start-Sleep -Seconds 30", timeout=1)
@@ -159,7 +159,7 @@ class WindowsWorkerTests(unittest.TestCase):
     def test_crash_restart_uses_claim_even_if_cursor_is_restored_to_old_value(self):
         marker = self.root / "one-execution.txt"
         job = self.enqueue(f"[IO.File]::AppendAllText({self.quote(marker)}, 'once'); Start-Sleep -Seconds 30", timeout=60)
-        self.until(lambda: marker.exists() and marker.read_text() == "once")
+        self.until(lambda: marker.exists() and marker.read_text(encoding="utf-8") == "once")
         self.assertTrue((self.worker_state / "claims" / f"{job}.json").is_file())
         self.stop_worker(force=True)
         # 只在临时测试状态模拟旧 cursor 恢复，证明独占意向阻止重放。
@@ -167,7 +167,7 @@ class WindowsWorkerTests(unittest.TestCase):
         self.start_worker()
         next_job = self.enqueue("[Console]::WriteLine('resumed')")
         self.assertEqual(self.result(next_job)["rc"], 0)
-        self.assertEqual(marker.read_text(), "once")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "once")
         self.assertFalse((self.server_state / "results" / f"{job}.json").exists())
 
     def test_unsent_result_is_retained_and_reposted_after_restart_without_rerun(self):
@@ -183,7 +183,7 @@ class WindowsWorkerTests(unittest.TestCase):
         self.start_worker()
         result = self.result(job)
         self.assertEqual(result["rc"], 0)
-        self.assertEqual(marker.read_text(), "once")
+        self.assertEqual(marker.read_text(encoding="utf-8"), "once")
         self.assertEqual(local.read_bytes(), before)
         self.until(lambda: Path(str(local) + ".sent").exists())
 
