@@ -20,7 +20,7 @@
 - xdev 嵌入包裝器的正文用 UTF-8 無 BOM；由 PowerShell 5.1 直接讀取的獨立 `.ps1` 依其需要使用 UTF-8 BOM。
 - 原生程式寫 stderr 不必然失敗；按 `$LASTEXITCODE`、持久回執及科學判定核對。
 - `foreach` 語句不能直接接管道，可先收成陣列，再交給 `Sort-Object` 等命令。
-- JSON 多行讀完整字串；哈希表陣列按明確鍵取值，不依賴 property adaptation。
+- JSON 明確以 `Get-Content -LiteralPath $ReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json` 讀取；PowerShell 5.1 預設解碼可能破壞無 BOM 的中文字元，檔案 SHA 相同不代表解碼或解析正確。哈希表陣列按明確鍵取值，不依賴 property adaptation。
 - `run` 提供 `Expand`、`$XRoot`、`Emit`；`detach` 不提供 `Emit`，背景正文自行寫短 JSON 或具名記錄。
 - `ZipArchiveMode` 相關程式需載入正確壓縮組件；路徑、原腳本與包裝器 SHA 各自記錄。
 

@@ -260,6 +260,10 @@ class WindowsWorkerTests(unittest.TestCase):
             "-File", str(SOURCE / "windows/install.ps1"), "-Server", self.url + "/not-an-origin",
             "-SecretFile", str(self.worker_state / "secret"), "-State", str(destination)], capture_output=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
+        diagnostic = " ".join(result.stderr.decode("utf-8", "replace").split())
+        self.assertIn("Server must be an HTTP(S) origin with no credentials, query or fragment.", diagnostic)
+        self.assertNotIn("ParserError", diagnostic)
+        self.assertNotIn("UnexpectedToken", diagnostic)
         self.assertFalse(destination.exists())
 
     def test_windows_installer_fresh_local_state(self):
