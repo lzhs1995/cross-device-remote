@@ -13,10 +13,13 @@ Keep development and review on the Mac while Windows runs software and data that
 - A Python Mac controller and a user-level Windows PowerShell worker.
 - Signed control messages, stable request IDs, late-result recovery and file SHA-256 checks.
 - A session-bound ClaudeR entry with separate execute, submit, poll and result operations.
+- Source candidates for independent named-task submission, RStudio async fanout with aggregate observation, and a separate resource-key control channel.
 - A shared `SKILL.md` and install links for Codex, Claude Code, Gemini and Antigravity. Other command-capable agents can read the same skill and run the CLI explicitly.
 - English and Traditional Chinese setup, architecture, recovery and validation guides; reusable operational recipes and original SVG artwork.
 
 The originating deployment has run real research batches through Windows RStudio/ClaudeR and MplusAutomation. **The first public package still needs fresh-machine Windows validation.** Installed links do not establish automatic loading by every agent, and local tests do not establish remote scientific acceptance. See the [validation contract](docs/validation.md).
+
+The concurrency changes described here are **candidates in this checkout**, not confirmation that an installed client supports them. No four-process Windows Mplus run or speed benchmark is claimed. See the [actual interfaces and admission limits](docs/concurrency.md).
 
 ## Install
 
@@ -60,7 +63,9 @@ Keep the returned request ID. If the wait expires, use `xdev result ID`; do not 
 | --- | --- | --- |
 | Short PowerShell | `xdev run check.ps1` | Holds the shared command queue; keep it short |
 | Background PowerShell | `xdev detach unique-name job.ps1` | Rejoin with the same name using `tail` or `wait` |
+| Candidate named tasks | `xdev task-submit`, `task-status`, `task-collect` | Submit independent children first; observe and collect by original name |
 | Windows RStudio / ClaudeR | `xdev rstudio bind`, `execute`, `submit`, `poll`, `result` | Bind a real session; reuse the original request/job ID |
+| Candidate RStudio fanout | `xdev rstudio fanout-submit`, `fanout-poll`, `fanout-merge` | External host grant; batch capacity and lifecycle evidence only |
 | Standalone R script | `xdev rscript analysis.R --out ./results/run` | Separate route from RStudio; collects the whole work directory |
 | Direct Mplus input | `xdev mplus model.inp --input synthetic.dat --out ./results/run` | Separate route from MplusAutomation; requires installed Mplus |
 | Files | `xdev push`, `pull`, `pull-dir` | Checks bytes; directory collection does not filter private inputs |
@@ -85,7 +90,9 @@ Read the [architecture](docs/architecture.md) for the two agent locations and id
 
 ## Reliable and efficient operation
 
-Prepare scripts before requesting a shared Windows slot. Submit one useful approved batch, let Windows schedule its members, and use one low-frequency observer of the original job. When a slot is granted, start the already prepared batch promptly rather than doing new engineering in the window.
+Prepare scripts before requesting a shared Windows slot. Submit approved independent asynchronous members before waiting for completion, then use one aggregate observer of their original jobs. A serial transport queue or one mutable Stata session does not make the host a single-model computer. Stata frames support multiple datasets but still share command execution, macros, logs and cwd within that session.
+
+Host admission must account for available physical RAM bytes, commit headroom, all running/reserved process and thread budgets, and output/scratch growth on each volume. Reuse the host owner's `HostReservations` across queues. Fanout receipts explicitly say `BATCH_ONLY`; the candidate does not implement atomic host admission. Original caps, `apim_v2` cap-1/cap-2 and foreground-only contracts stay attached to their original runs.
 
 Separate network reachability, command acceptance, RStudio identity, engine execution and scientific success. Preserve UNKNOWN results and spent budgets. A timeout is a reason to reconcile the original request, not replay it. Do not claim exactly-once behavior through every crash or power failure.
 
@@ -103,6 +110,8 @@ HMAC authenticates messages but does not encrypt them. Use a private Tailscale p
 | Validation and honest performance claims | [Guide](docs/validation.md) | [指南](docs/validation.zh-TW.md) |
 | RStudio / ClaudeR / MplusAutomation | [Recipe](recipes/windows-rstudio-clauder.en.md) | [配方](recipes/windows-rstudio-clauder.md) |
 | Research batch continuation | [Recipe](recipes/research-batches.en.md) | [配方](recipes/pp-lgcm-mplus-continuation.md) |
+
+Candidate details: [concurrency contracts](docs/concurrency.md), including the independent control server/state, and [authorized single-window close](recipes/windows-owned-window-close.md).
 
 Additional Traditional Chinese recipes: [Rscript](recipes/windows-r.md), [direct Mplus](recipes/windows-mplus.md), [MplusAutomation](recipes/windows-mplusautomation.md), [PowerShell/WSL/shared queues](recipes/windows-wsl-ops-lessons.md), and [migration/disk/verification](recipes/mac-restore-and-remote-acceptance-lessons.md).
 

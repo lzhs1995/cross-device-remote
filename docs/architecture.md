@@ -14,6 +14,8 @@
 | Windows RStudio + ClaudeR | Execute in a verified R session; start and observe asynchronous R work | That every member of a research batch passed |
 | R + MplusAutomation + Mplus | Run the original scientific script and save model evidence | That results have been independently checked or collected |
 | Domain workflow | Budgets, model design, convergence checks, result-only export, independent verification | Transport health |
+| Candidate fanout coordinator | Pin independent members, submit async jobs and aggregate original receipts | Atomic host admission, native MCP loading or scientific merge |
+| Host owner's `HostReservations` | Shared admission across queues for RAM, commit, threads and per-volume growth | Scientific acceptance |
 
 The Windows agent initiates the control connection to the Mac. The Mac does not expose Windows RStudio directly: `xdev rstudio` sends a short Windows command that calls ClaudeR on Windows loopback. A discovery token, when available, is read on Windows and used there.
 
@@ -41,8 +43,22 @@ A lost transport response can coexist with a completed model. Read original evid
 
 `run` holds the shared command queue. `detach` and ClaudeR asynchronous work release that queue after launch. Queue availability does not imply that Mplus is idle. Conversely, old dispatched IDs without a returned receipt do not alone establish that a process is still alive.
 
+Candidate named tasks add `task-submit`, `task-status` and `task-collect`: submit independent children before waiting, then join their original names. Each child receives a unique cwd and `TMP`/`TEMP`. RStudio fanout instead preserves the required RStudio → asynchronous R → MplusAutomation route; its state namespace is `<binding-state>/fanout/<run-id>/`. The wrapper sets worker-local cwd and temporary environment, but does not relocate an already created callr R process's `tempdir()`.
+
+The separate control candidate uses wire version `xdev-control/1`, its own server, SQLite state and worker. It is invoked as `python3 scripts/xdev_control.py`, not by repointing the live legacy worker. It negotiates capabilities, persists claim-before-start, keeps serial barriers and allows explicit independent jobs with disjoint resource keys. UNKNOWN retains its reservations. It never migrates legacy queue cursors. [Commands and exact contracts](concurrency.md) distinguish this candidate from installation and live acceptance.
+
+## Session ordering and host capacity
+
+One mutable Stata session needs ordered access to commands, macros, returned results, log handles and cwd. Stata frames allow multiple datasets; they do not create independent interpreters. Lease the bound session/port, not the entire host. Independent sessions still honor their original Stata engine limit, which does not become a Mplus limit.
+
+Reuse one host-wide `HostReservations` authority across all queues. Admit against available physical RAM bytes and system commit headroom separately, plus all process/thread budgets and output/scratch growth on each volume. Include unstarted reservations and running members' remaining growth. Neither a memory percentage nor current single-process usage proves four-model capacity. Original caps, `apim_v2` cap-1/cap-2 and foreground-only contracts remain attached to their existing runs.
+
+Fanout pins an external grant and checks its fields/expiry, but explicitly reports `capacity_scope: BATCH_ONLY` and `external_host_admission_enforced_by_xdev: false`. It does not implement atomic host reservations. Resource-key exclusion in the new control channel is also distinct from host memory admission. A per-run lock must never be presented as either one.
+
 ## Efficient use
 
-Prepare and validate scripts on the Mac before taking a Windows execution window. Transfer code once, reuse permitted data on Windows, and let one Windows worker process the approved batch. Collect a small result-only export after verification. Keep one low-frequency observer of the original job rather than repeatedly reconnecting or submitting tiny full-roundtrip jobs.
+Prepare and validate scripts on the Mac before taking a Windows execution window. Transfer code once, reuse permitted read-only inputs, and submit approved independent R workers before waiting for them to finish. Keep one aggregate observer of original job IDs. Collect a small result-only export after domain verification; `fanout-merge` merges lifecycle receipts only and leaves scientific acceptance `NOT_EVALUATED`.
 
 A shared-window grant should trigger the already prepared submission promptly. Bind the grant to the approved plan, script hashes, owner, and budget; persist a claim before submission, and check expiry again when Windows enters the R code. A task-specific grant watcher is a domain integration, not a built-in `xdev` scheduler.
+
+Candidate code and offline checks do not prove real parallel Mplus execution. Require overlapping real PID/birth intervals and original model terminals. A short process may exit before `MainModule` inspection; missing module information does not imply it is live. Measure intervals using a local monotonic clock; cross-host wall-clock differences need a skew bound and cannot promise sub-two-second latency. A speedup requires matched serial/parallel runs and numerical agreement.

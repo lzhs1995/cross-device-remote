@@ -4,6 +4,8 @@
 
 This route sends work into a verified Windows RStudio session. A Windows-local agent can invoke the same R script through local ClaudeR without routing through a Mac.
 
+The `fanout-*` commands below are source candidates. Verify the selected checkout's help; this document does not establish installation, native MCP loading, four simultaneous Mplus PIDs or a speed benchmark.
+
 ## Prerequisites
 
 - Windows remains logged in and awake, with R, RStudio and a compatible ClaudeR installed. Estimation also requires a licensed Mplus installation and the intended MplusAutomation version.
@@ -45,21 +47,33 @@ cat("MplusAutomation:", as.character(packageVersion("MplusAutomation")), "\n")
 xdev rstudio execute --state ./rstudio-state --request-id inspect-01 --code-file inspect.R
 ```
 
-Prepare the original scientific driver on Windows, using `xdev push` and a SHA check. `submit.R` can source that approved driver from a project path already configured in the R session:
+Keep existing serial/foreground-only contracts on their approved route and cap; the asynchronous examples below do not change them. For one member approved for async execution, prepare its scientific driver on Windows, using `xdev push` and a SHA check. Its `submit.R` can source the approved driver from a project path already configured for that worker:
 
 ```r
 project_root <- Sys.getenv("XDEV_PROJECT_ROOT")
 stopifnot(nzchar(project_root))
-source(file.path(project_root, "run_batch.R"), local = TRUE)
+source(file.path(project_root, "run_member.R"), local = TRUE)
 ```
 
 ```sh
-xdev rstudio submit --state ./rstudio-state --request-id batch-01 --job-id batch-01 --code-file submit.R
-xdev rstudio poll --state ./rstudio-state --job-id batch-01
-xdev rstudio result --state ./rstudio-state --request-id batch-01
+xdev rstudio submit --state ./rstudio-state --request-id member-01 --job-id member-01 --code-file submit.R
+xdev rstudio poll --state ./rstudio-state --job-id member-01
+xdev rstudio result --state ./rstudio-state --request-id member-01
 ```
 
-Submit one approved batch. Load MplusAutomation once inside the asynchronous Windows R worker and process members there. Keep one low-frequency Mac observer of stage, message, updated_at and the original job ID. Avoid transferring a full work directory for every short model.
+For a new batch of approved independent models, use one asynchronous R worker per admitted member and submit the available members before observing completion. Each worker loads its own packages. Prepare the exact [fanout contract and external host grant](../docs/concurrency.md#rstudio-fanout), then use the source candidate:
+
+```sh
+./scripts/xdev rstudio fanout-submit --state ./rstudio-state --run-id example-run --contract ./fanout.json
+./scripts/xdev rstudio fanout-poll --state ./rstudio-state --run-id example-run --contract ./fanout.json --max-polls 8
+./scripts/xdev rstudio fanout-merge --state ./rstudio-state --run-id example-run --contract ./fanout.json
+```
+
+`fanout-poll` observes original jobs; it does not start pending members. Refill free slots with `fanout-submit` on the same run/contract while its grant is valid. UNKNOWN or FAILED blocks new submissions. `fanout-merge` only records verified lifecycle success; scientific aggregation and acceptance are separate. Keep one aggregate observer of stage, message, updated_at and original job IDs.
+
+Fanout is `BATCH_ONLY`: reuse host-wide `HostReservations` for physical RAM bytes, commit headroom, all process/thread reservations and per-volume scratch/output growth. A Stata session lease does not cap Mplus on the host. Preserve existing caps, `apim_v2` cap-1/cap-2 and foreground-only contracts.
+
+Each member needs unique writable output and scratch directories. The wrapper changes the async worker's cwd and `TMP`/`TEMP`/`TMPDIR`, but callr has already created the R process: its existing `tempdir()` is not relocated. Shared inputs remain read-only; avoid transferring the full work directory per short model.
 
 ## 3. Preserve the request through unknown outcomes
 
@@ -76,6 +90,8 @@ New `xdev rstudio` wire receipts are bounded to 64 KiB on Windows. Larger origin
 Run domain checks on the original output and create a separate permitted result-only export. `pull-dir` copies the whole selected directory; it does not exclude `data.dat`. Verify the export manifest before collection, then compare the exact received file set and hashes.
 
 RStudio can show the received code and main-session output; not every asynchronous worker line must appear in its Console. A short Mplus process can finish before Task Manager is opened. Prove the route through R invocation, Mplus start/end records and saved output, not a Console screenshot alone.
+
+`MainModule` may be unavailable after a short child exits; that does not establish a live process. Preserve terminal evidence separately. Prove concurrency with overlapping real Mplus PID/birth intervals, and measure local durations with a monotonic clock. Cross-host UTC differences need clock-skew uncertainty; they do not guarantee sub-two-second latency.
 
 Successful HTTP fallback is not successful native MCP. Obtain native MCP evidence with the workbench procedure when required. A Python process directly launching Mplus is also not equivalent to the requested RStudio → MplusAutomation route.
 

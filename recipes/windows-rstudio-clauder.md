@@ -4,6 +4,8 @@
 
 本配方把工作送進已核身分的 Windows RStudio。Windows 本機 agent 可以透過本機 ClaudeR 執行同一份 R 腳本；不必為了沿用科學經驗繞經 Mac。
 
+下列 `fanout-*` 是原始碼候選命令，先核所選 checkout 的 help；本文不代表已安裝、原生 MCP 已載入、四個 Mplus PID 已同時運行或速度對照已通過。
+
 ## 前置條件
 
 - Windows 保持登入與喚醒，已安裝 R、RStudio、相容 ClaudeR；需要估計時另有合法 Mplus 與指定 MplusAutomation 版本。
@@ -45,21 +47,33 @@ cat("MplusAutomation:", as.character(packageVersion("MplusAutomation")), "\n")
 xdev rstudio execute --state ./rstudio-state --request-id inspect-01 --code-file inspect.R
 ```
 
-在 Windows 準備原科學 driver，經 `xdev push` 後核 SHA。`submit.R` 只需 source 已批准的 Windows 腳本；例如使用事先於該 R 工作階段設定的專案路徑：
+既有串行／僅前景契約沿原路線與 cap；以下非同步範例不改變它們。單一成員已獲准非同步時，在 Windows 準備其原科學 driver，經 `xdev push` 後核 SHA。成員的 `submit.R` source 已批准腳本；例如使用事先為該 worker 設定的專案路徑：
 
 ```r
 project_root <- Sys.getenv("XDEV_PROJECT_ROOT")
 stopifnot(nzchar(project_root))
-source(file.path(project_root, "run_batch.R"), local = TRUE)
+source(file.path(project_root, "run_member.R"), local = TRUE)
 ```
 
 ```sh
-xdev rstudio submit --state ./rstudio-state --request-id batch-01 --job-id batch-01 --code-file submit.R
-xdev rstudio poll --state ./rstudio-state --job-id batch-01
-xdev rstudio result --state ./rstudio-state --request-id batch-01
+xdev rstudio submit --state ./rstudio-state --request-id member-01 --job-id member-01 --code-file submit.R
+xdev rstudio poll --state ./rstudio-state --job-id member-01
+xdev rstudio result --state ./rstudio-state --request-id member-01
 ```
 
-一次提交整個已准入批次；在 Windows 非同步 R worker 內載入 MplusAutomation 並串行處理成員。Mac 保持一個低頻觀察器，讀 stage、message、updated_at 與同一 job ID。勿為每個短模型傳輸整份工作目錄。
+新批次中已批准獨立的模型，每個准入成員使用獨立非同步 R worker，先提交可用成員，再聚合觀察。每個 worker 明確載入自己的套件。準備 [fanout 契約與外部主機 grant](../docs/concurrency.md#rstudio-fanout)，使用原始碼候選：
+
+```sh
+./scripts/xdev rstudio fanout-submit --state ./rstudio-state --run-id example-run --contract ./fanout.json
+./scripts/xdev rstudio fanout-poll --state ./rstudio-state --run-id example-run --contract ./fanout.json --max-polls 8
+./scripts/xdev rstudio fanout-merge --state ./rstudio-state --run-id example-run --contract ./fanout.json
+```
+
+`fanout-poll` 只查原 job，不啟動 pending 成員。終態釋放批次槽位後，在原 grant 有效期內，沿同一 run／contract 再呼叫 `fanout-submit`，只提交尚未嘗試者。UNKNOWN 或 FAILED 阻止新提交。`fanout-merge` 只記錄生命週期成功，科學合併與驗收另做。Mac 保留一個聚合觀察器，讀各原 job 的 stage、message、updated_at。
+
+fanout 為 `BATCH_ONLY`；可用實體 RAM bytes、commit 餘量、全部程序／執行緒預約及各卷暫存／輸出成長，由共用 `HostReservations` 准入。Stata 單工作階段租約不限制整機 Mplus。保留原 cap、`apim_v2` cap-1／cap-2 及僅前景契約。
+
+各成員獨占可寫輸出與 scratch 目錄。wrapper 設定非同步 worker 的 cwd 與 `TMP`／`TEMP`／`TMPDIR`，但 callr 已建立 R 程序，既有 `tempdir()` 不會因此搬移。共享輸入保持唯讀，不為每個短模型傳輸整份工作目錄。
 
 ## 3. 保留原請求，處理未知結果
 
@@ -76,6 +90,8 @@ xdev rstudio result --state ./rstudio-state --request-id batch-01
 在原輸出上做領域核驗，另建立僅含允許結果的 export。`pull-dir` 會取回整個指定目錄，不會排除 `data.dat`。取回前核 manifest，取回後核精確檔案集合與 SHA。
 
 RStudio 能顯示接收的程式碼及主工作階段輸出；非同步 worker 的每行輸出不一定都在 Console。短 Mplus 程序可能在打開工作管理員前已結束；以 R 呼叫、Mplus 起止與保存輸出證明執行位置，不以 Console 截圖代替驗收。
+
+短程序退出後可能已無法讀取 `MainModule`，不能據此推定它仍活著；終態證據另行保留。實際並行須有真實 Mplus PID／出生時間的重疊區間。耗時用各主機 monotonic clock，跨主機 UTC 差需附時鐘偏差，不能據此保證延遲小於兩秒。
 
 HTTP fallback 已通不能寫成 agent 原生 MCP 已通；原生 MCP 證據應依 workbench 的檢查取得。Python 直接啟動 Mplus 也不能冒充指定的 RStudio → MplusAutomation 路線。
 

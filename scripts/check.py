@@ -17,7 +17,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='xdev-check-') as tmp:
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         commands = [[sys.executable, '-B', str(ROOT / 'scripts' / name)] for name in
-                    ['test_advertise.py', 'test_clauder.py', 'test_health.py', 'test_init.py', 'test_install.py', 'test_public.py']]
+                    ['test_advertise.py', 'test_clauder.py', 'test_health.py', 'test_init.py', 'test_install.py', 'test_public.py',
+                     'test_transfer_concurrency.py', 'test_push_recovery.py', 'test_push_receipt_callback.py',
+                     'test_task_lifecycle.py', 'test_task_cli.py', 'test_enqueue_concurrency.py', 'test_fanout.py', 'test_control.py',
+                     'test_result_publication.py']]
         commands.append([sys.executable, '-B', str(ROOT / 'scripts/test_result_read.py'),
                          str(ROOT / 'scripts/xdev_core.py'), str(Path(tmp) / 'receipt.json')])
         commands.append([sys.executable, '-B', str(ROOT / 'scripts/check_public.py')])

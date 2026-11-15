@@ -6,7 +6,7 @@ serve：只接受 --allow-ip 的连接；GET /next 长轮询取下一条已签�
 run：把一个 PowerShell 脚本签名入队，等回执，打印 stdout/stderr，退出码同远端。
 签名：HMAC-SHA256(secret, "cmd|id|timeout|script_b64") / ("res|id|rc|out_b64|err_b64")。
 """
-import argparse, base64, hashlib, hmac, json, os, sys, time
+import argparse, base64, hashlib, hmac, json, os, sys, tempfile, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -32,6 +32,156 @@ def pending_after(last: int):
         if i > last and not (ROOT / "results" / f"{i}.json").exists():
             return json.loads((ROOT / "queue" / f"{i}.json").read_text())
     return None
+
+
+class BadResultSignature(ValueError):
+    """A well-shaped result failed the legacy result HMAC."""
+
+
+def _json_record(raw):
+    # Duplicate keys and non-finite numbers have ambiguous representations.
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def constant(_):
+        raise ValueError("non-finite JSON number")
+
+    record = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+    if not isinstance(record, dict):
+        raise ValueError("JSON record must be an object")
+    return record
+
+
+def _record_bytes(record):
+    return json.dumps(record, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def _validate_result(record, expected_id=None):
+    if not isinstance(record, dict):
+        raise ValueError("result must be an object")
+    if type(record.get("id")) is not int or record["id"] <= 0:
+        raise ValueError("invalid result id")
+    if expected_id is not None and record["id"] != expected_id:
+        raise ValueError("result id mismatch")
+    if type(record.get("rc")) is not int:
+        raise ValueError("invalid result rc")
+    for field in ("out", "err"):
+        if not isinstance(record.get(field), str):
+            raise ValueError("invalid result output")
+        base64.b64decode(record[field], validate=True)
+    if not isinstance(record.get("mac"), str):
+        raise ValueError("missing result signature")
+    expect = sign("res", record["id"], record["rc"], record["out"], record["err"])
+    if not hmac.compare_digest(expect.encode("ascii"), record["mac"].encode("utf-8")):
+        raise BadResultSignature("result signature mismatch")
+    _record_bytes(record)  # Also reject non-JSON or non-finite metadata.
+
+
+def _require_request(i):
+    try:
+        job = _json_record((ROOT / "queue" / f"{i}.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, UnicodeError, ValueError) as exc:
+        raise ValueError("original request unavailable") from exc
+    if (type(job.get("id")) is not int or job["id"] != i
+            or type(job.get("timeout")) is not int or job["timeout"] < 0
+            or not isinstance(job.get("script"), str)
+            or not isinstance(job.get("mac"), str)):
+        raise ValueError("invalid original request")
+    base64.b64decode(job["script"], validate=True)
+    expect = sign("cmd", i, job["timeout"], job["script"])
+    if not hmac.compare_digest(expect.encode("ascii"), job["mac"].encode("utf-8")):
+        raise ValueError("original request signature mismatch")
+
+
+def _sync_directory(directory):
+    # Directory fsync is available on the Mac server. Windows does not expose
+    # O_DIRECTORY; neither path claims crash-proof exactly-once execution.
+    if hasattr(os, "O_DIRECTORY"):
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _publish_new(path, payload):
+    """Expose complete bytes with a no-replace link, across threads/processes."""
+    fd, temporary = tempfile.mkstemp(prefix=".result-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        _sync_directory(path.parent)
+        return True
+    finally:
+        os.unlink(temporary)
+
+
+def publish_result(record):
+    """Keep the first complete result; acknowledge identical retries only.
+
+    This preserves the v1 wire signature. It cannot bind results to a queue UUID,
+    request digest or execution attempt absent from that protocol. Keep the same
+    original queue/key; metadata (such as ms) is compared, but is not v1-signed.
+    """
+    _validate_result(record)
+    i = record["id"]
+    _require_request(i)
+    payload = _record_bytes(record)
+    path = ROOT / "results" / f"{i}.json"
+    if _publish_new(path, payload):
+        return "published"
+    try:
+        original = _json_record(path.read_text(encoding="utf-8"))
+        identical = _record_bytes(original) == payload
+    except (UnicodeError, ValueError):
+        identical = False
+    if identical:
+        _sync_directory(path.parent)
+        return "duplicate"
+    # Never repair/replace a partial legacy result. Preserve the competing
+    # candidate separately and report conflict, including metadata conflicts.
+    directory = ROOT / "conflicts" / str(i)
+    directory.mkdir(parents=True, exist_ok=True)
+    conflict = directory / (hashlib.sha256(payload).hexdigest() + ".json")
+    if not _publish_new(conflict, payload):
+        # The legacy worker retries every unsent outbox result. Retain one
+        # complete candidate per content hash, not a new file per retry.
+        if conflict.read_bytes() != payload:
+            raise OSError("existing conflict evidence differs from its digest")
+        _sync_directory(directory)
+    return "conflict"
+
+
+def read_result(i):
+    """Return a validated original receipt, or None while absent/invalid.
+
+    Legacy servers may still be writing a partial file. Reading never repairs
+    it or resubmits work. Filesystem failures other than missing remain errors.
+    """
+    if type(i) is not int or i <= 0:
+        raise ValueError("invalid original id")
+    try:
+        raw = (ROOT / "results" / f"{i}.json").read_bytes()
+    except FileNotFoundError:
+        return None
+    try:
+        record = _json_record(raw.decode("utf-8"))
+        _validate_result(record, i)
+    except (UnicodeError, ValueError):
+        return None
+    return record
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -112,20 +262,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path != "/result":
             return self._send(404)
-        n = int(self.headers.get("Content-Length", "0"))
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self._send(400)
         if n <= 0 or n > 64_000_000:
             return self._send(413)
         try:
-            r = json.loads(self.rfile.read(n).decode("utf-8"))
-            expect = sign("res", r["id"], r["rc"], r["out"], r["err"])
-        except Exception as e:  # 格式坏就拒收
-            log(f"BAD_RESULT {e!r}")
-            return self._send(400)
-        if not hmac.compare_digest(expect, str(r.get("mac", ""))):
-            log(f"BAD_MAC id={r.get('id')}")
+            r = _json_record(self.rfile.read(n).decode("utf-8"))
+            status = publish_result(r)
+        except BadResultSignature:
+            log("BAD_MAC result")
             return self._send(401)
-        (ROOT / "results" / f"{int(r['id'])}.json").write_text(json.dumps(r))
-        log(f"RESULT id={r['id']} rc={r['rc']}")
+        except (UnicodeError, ValueError, TypeError):
+            log("BAD_RESULT invalid record or original request")
+            return self._send(400)
+        except OSError:
+            # An unknown publication outcome is retried with the same bytes/ID.
+            # Do not enqueue again or erase an already linked result.
+            return self._send(503)
+        if status == "conflict":
+            log(f"RESULT_CONFLICT id={r['id']}")
+            return self._send(409, b'{"error":"RESULT_CONFLICT"}')
+        log(f"RESULT id={r['id']} rc={r['rc']} publication={status}")
         self._send(200, b"{}")
 
 
@@ -216,8 +375,10 @@ def enqueue(b64: str, timeout: int) -> int:
         ids = [int(p.stem) for p in (ROOT / "queue").glob("*.json")]
         i = max(ids, default=0) + 1
         job = {"id": i, "timeout": timeout, "script": b64, "mac": sign("cmd", i, timeout, b64)}
-        tmp = ROOT / "queue" / f".{i}.{os.getpid()}.tmp"
-        tmp.write_text(json.dumps(job))
+        # PP：每次尝试独有临时文件，跨线程不可互改/互删。
+        tmp = ROOT / "queue" / f".{i}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        with tmp.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(job))
         try:
             os.link(tmp, ROOT / "queue" / f"{i}.json")
             return i
@@ -228,14 +389,18 @@ def enqueue(b64: str, timeout: int) -> int:
 
 
 def await_result(i: int, wait: int) -> int:
-    res = ROOT / "results" / f"{i}.json"
-    end = time.time() + wait
-    while time.time() < end and not res.exists():
-        time.sleep(0.5)
-    if not res.exists():
+    end = time.monotonic() + max(0, wait)
+    while True:
+        r = read_result(i)
+        if r is not None:
+            break
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
+    if r is None:
         print(f"WBAGENT_WAITING id={i}", file=sys.stderr)
         return 124
-    r = json.loads(res.read_text())
     sys.stdout.write(base64.b64decode(r["out"]).decode("utf-8", "replace"))
     err = base64.b64decode(r["err"]).decode("utf-8", "replace")
     if err:

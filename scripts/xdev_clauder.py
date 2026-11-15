@@ -9,12 +9,17 @@ from pathlib import Path
 import re
 import sys
 import time
+import threading
 import uuid
+
+
+_INVOKE_LOCK = threading.Lock()
 
 
 def add_parser(sub):
     parser = sub.add_parser("rstudio", help="bind Windows ClaudeR, execute R, submit once and poll the same async job")
-    parser.add_argument("action", choices=("bind", "execute", "submit", "poll", "result"))
+    parser.add_argument("action", choices=("bind", "execute", "submit", "poll", "result",
+                                           "fanout-submit", "fanout-poll", "fanout-merge"))
     parser.add_argument("--state", required=True, help="durable local state directory for one Windows RStudio identity")
     parser.add_argument("--session-name")
     parser.add_argument("--port", type=int)
@@ -26,6 +31,9 @@ def add_parser(sub):
     parser.add_argument("--agent-id", default="xdev-rstudio-agent")
     parser.add_argument("--http-timeout", type=int, default=25)
     parser.add_argument("--wait", type=int, default=55)
+    parser.add_argument("--contract", help="approved independent R member contract (fanout actions)")
+    parser.add_argument("--run-id", help="immutable fanout run identity within this binding")
+    parser.add_argument("--max-polls", type=int, default=8, help="maximum async status queries per fanout-poll invocation (1-32)")
 
 
 def name(value, label):
@@ -225,14 +233,16 @@ def save_response(directory, rc, stdout, stderr, queue_id, elapsed):
 
 def invoke(directory, script, http_timeout, wait):
     import xdev_core as core
-    (directory / "request.ps1").write_text(script, encoding="utf-8")
-    journal = QueueJournal(directory)
-    began = time.monotonic()
-    try:
-        with contextlib.redirect_stderr(journal):
-            rc, out, err, queue_id = core.run_ps(script, timeout=http_timeout + 20, wait=wait)
-    finally:
-        journal.close()
+    # redirect_stderr 是进程全局状态；多个 run 不能交叉认领彼此的队列 ID。
+    with _INVOKE_LOCK:
+        (directory / "request.ps1").write_text(script, encoding="utf-8")
+        journal = QueueJournal(directory)
+        began = time.monotonic()
+        try:
+            with contextlib.redirect_stderr(journal):
+                rc, out, err, queue_id = core.run_ps(script, timeout=http_timeout + 20, wait=wait)
+        finally:
+            journal.close()
     return save_response(directory, rc, out, err, queue_id, time.monotonic() - began)
 
 
@@ -283,6 +293,9 @@ def run(args):
     state = Path(args.state).expanduser().resolve()
     if not 1 <= args.http_timeout <= 35 or not 0 <= args.wait <= 55:
         raise ValueError("HTTP timeout must be 1-35 seconds and local wait 0-55 seconds")
+    if args.action.startswith("fanout-"):
+        import xdev_fanout
+        return xdev_fanout.run(args)
     if args.action == "bind":
         for key in ("session_name", "port", "r_pid", "rstudio_pid"):
             if not getattr(args, key):

@@ -59,8 +59,12 @@ def main(argv=None) -> int:
     p.add_argument("--max", type=int, default=3600)
     import xdev_clauder
     xdev_clauder.add_parser(sub)
+    import xdev_tasks
+    xdev_tasks.add_parser(sub)
     a = ap.parse_args(argv)
 
+    if a.cmd in ("task-submit", "task-status", "task-resume", "task-collect"):
+        return xdev_tasks.run(a)
     if a.cmd == "rstudio":
         try:
             return xdev_clauder.run(a)

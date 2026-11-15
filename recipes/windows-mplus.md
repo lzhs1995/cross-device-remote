@@ -18,6 +18,14 @@ xdev mplus model.inp --input synthetic.dat --out ./results/mplus-run --max 3600
 
 工具取回整個工作目錄，包含輸入副本；限制外流資料請改為 Windows 本機資料與僅結果匯出流程。
 
+## 獨立成員並行
+
+上面的 `xdev mplus` 是提交、等待、取回的便利入口。逐一呼叫它會使呼叫方等待，不能據此認定 Windows 或 Tailscale 只能跑一個模型。任務明確允許直接引擎路線時，候選 [具名生命週期](../docs/concurrency.md#named-task-lifecycle) 可先用 `task-submit` 啟動多個已准入成員，再沿各原名 `task-status`，終態後 `task-collect`。它不替模型實作有限時間監督，driver 必須保留原引擎預算。
+
+各成員獨占 cwd、輸出及 `TMP`／`TEMP`。先經共用 `HostReservations` 分別核可用 RAM bytes、commit 餘量、全部程序／執行緒及各卷未來成長；保留原 cap、`apim_v2` cap-1／cap-2 及僅前景契約。Stata 單工作階段保序不構成 Mplus 全機鎖。UNKNOWN 沿原名字與程序出生身分接回，不重投或清 claim。
+
+候選介面未代表安裝或實機驗收。並行證據須有真實 Mplus PID／出生時間的重疊區間；短程序退出後讀不到 `MainModule`，不等於程序仍在執行。原始 `.out`、退出回執與科學驗收分開保存，速度提升另需同規格串行／並行牆鐘對照及數值核對。
+
 ## 合成冒煙
 
 只有在獲准使用 Mplus 的窗口才執行：

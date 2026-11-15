@@ -14,6 +14,8 @@
 | Windows RStudio + ClaudeR | 在已核身分的 R 工作階段中執行，啟動及觀察非同步 R 工作 | 整批模型全部通過 |
 | R + MplusAutomation + Mplus | 執行原科學腳本並保存模型證據 | 已獨立核驗，或結果已取回 |
 | 領域工作流 | 預算、模型設計、收斂檢查、僅結果匯出、獨立核驗 | 傳輸通道健康 |
+| 候選 fanout 編排 | 固定獨立成員、提交非同步 job、聚合原回執 | 主機原子准入、原生 MCP 載入或科學合併 |
+| 主機擁有者的 `HostReservations` | 跨佇列共用 RAM、commit、執行緒及各卷成長准入 | 科學驗收 |
 
 Windows agent 主動連線到 Mac 領取命令。Mac 不直接暴露 Windows RStudio：`xdev rstudio` 派發短命令，由 Windows 本機呼叫 loopback 上的 ClaudeR。若 discovery 提供 token，就在 Windows 讀取並使用，不帶回 Mac。
 
@@ -41,8 +43,22 @@ Windows agent 主動連線到 Mac 領取命令。Mac 不直接暴露 Windows RSt
 
 `run` 會占用共用命令佇列；`detach` 和 ClaudeR 非同步工作在啟動後釋放佇列。佇列有空位不代表 Mplus 空閒；反過來，舊派發 ID 沒有回執，也不足以證明程序仍在執行。
 
+候選具名任務新增 `task-submit`、`task-status`、`task-collect`：先提交獨立子程序，再沿原名觀察。每個子程序具有獨占 cwd 與 `TMP`／`TEMP`。RStudio fanout 則保留指定的 RStudio → 非同步 R → MplusAutomation 路線，state 位於 `<binding-state>/fanout/<run-id>/`。wrapper 設定 worker 的 cwd 與暫存環境，但不會搬移已建立 callr R 程序的 `tempdir()`。
+
+獨立 control 候選目前使用 `xdev-control/1` wire version、專用 server／SQLite state／worker，由 `python3 scripts/xdev_control.py` 呼叫，不把既有 worker 改指新服務。它協商能力、先保存 claim 再啟動，保留 serial barrier，允許有明確且互不衝突 resource key 的獨立任務並行。UNKNOWN 保留預約；舊 queue cursor 不遷移。[命令與精確契約](concurrency.md) 將候選、安裝與實機驗收分開。
+
+## 工作階段保序與主機容量
+
+同一可變 Stata 工作階段的命令、巨集、返回結果、日誌與 cwd 需要保序。Stata frames 支援多份資料，不等於獨立解譯器。租約只覆蓋綁定 session／port，不擴大為整台主機。獨立 Stata 工作階段仍遵守原 Stata 引擎上限，該上限不延伸到 Mplus。
+
+跨佇列重用同一主機 `HostReservations`。實體 RAM 可用 bytes 與系統 commit 餘量分開准入，再核全部程序／執行緒預算及各卷輸出／暫存成長；包含未啟動預約及已運行成員後續成長。記憶體百分比或單程序當下用量都不能證明四路容量。原 cap、`apim_v2` cap-1／cap-2 與僅前景契約沿既有批次保留。
+
+fanout 固定外部 grant、檢查欄位及有效期，但明示 `capacity_scope: BATCH_ONLY`、`external_host_admission_enforced_by_xdev: false`，未實作主機原子預約。新 control 的 resource-key 排他也不是主機記憶體准入，單一 run 鎖更不能代替這兩層。
+
 ## 提高效率
 
-先在 Mac 準備並核驗腳本，再領取 Windows 執行窗口。程式碼傳一次，資料依授權留在 Windows，一個 Windows worker 執行已批准批次；核驗後才取回小型、僅含結果的匯出。沿原 job 保持一個低頻觀察器，避免反覆連線或為短模型做完整往返。
+先在 Mac 準備並核驗腳本，再領取 Windows 執行窗口。程式碼傳一次，共用輸入依唯讀授權複用，先提交已批准獨立 R worker，再等待完成。沿原 job ID 保留一個聚合觀察器；領域核驗後才取回小型僅結果匯出。`fanout-merge` 只合併生命週期回執，科學驗收仍為 `NOT_EVALUATED`。
 
 共用窗口獲准後，應立即提交已備好的工作。grant 綁定已批准的計畫、腳本 SHA、擁有者及預算；先持久保存 claim，再提交，Windows 進入 R 正文時再次核對是否過期。等待 grant 的任務專用觀察器屬領域整合，並非 `xdev` 內建調度器。
+
+候選碼與離線檢查不證明真實 Mplus 並行；需要真實 PID／出生時間的重疊區間及原模型終態。短程序退出後可能讀不到 `MainModule`，不能據此推定仍活著。耗時採各主機 monotonic clock；跨主機牆鐘差需有時鐘偏差界線，不能保證延遲小於兩秒。速度提升另需同規格串行／並行對照與數值一致。
