@@ -54,7 +54,7 @@ class StageCleanupTrace:
         return value
 
     def __enter__(self):
-        original_lstat, original_open = self.module.os.lstat, self.module.os.open
+        original_lstat, original_open = self.module.os.lstat, self.module._open_recovered_stage
         original_fstat, original_read, original_close = self.module.os.fstat, self.module.os.read, self.module.os.close
         original_unlink = Path.unlink
 
@@ -85,8 +85,9 @@ class StageCleanupTrace:
             if not self._is_path(path): return original_unlink(path, *args, **kwargs)
             return self._call('unlink', original_unlink, (path, *args), kwargs)
 
-        for name, wrapper in (('lstat', lstat), ('open', open_file), ('fstat', fstat), ('read', read), ('close', close)):
+        for name, wrapper in (('lstat', lstat), ('fstat', fstat), ('read', read), ('close', close)):
             self.stack.enter_context(patch.object(self.module.os, name, wrapper))
+        self.stack.enter_context(patch.object(self.module, '_open_recovered_stage', open_file))
         self.stack.enter_context(patch.object(Path, 'unlink', unlink))
         return self
 

@@ -233,14 +233,14 @@ class PushRecovery(unittest.TestCase):
         root, intent, name, payload = self.fixture()
         stage = self.state / 'files' / name
         external = self.root / 'external'; external.write_bytes(stage.read_bytes())
-        original_open = os.open
+        original_open = self.mod._open_recovered_stage
 
         def replace_before_open(path, flags, *args, **kwargs):
             if Path(path) == stage:
                 stage.unlink(); stage.symlink_to(external)
             return original_open(path, flags, *args, **kwargs)
 
-        with patch.object(self.mod.os, 'open', replace_before_open):
+        with patch.object(self.mod, '_open_recovered_stage', replace_before_open):
             result = self.mod.recover_push(root)
         self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
         self.assertTrue(stage.is_symlink())
@@ -251,14 +251,14 @@ class PushRecovery(unittest.TestCase):
         stage = self.state / 'files' / name
         replacement = self.root / 'replacement'; replacement.write_bytes(stage.read_bytes())
         replacement_identity = os.lstat(replacement).st_ino
-        original_open = os.open
+        original_open = self.mod._open_recovered_stage
 
         def replace_before_open(path, flags, *args, **kwargs):
             if Path(path) == stage:
                 os.replace(replacement, stage)
             return original_open(path, flags, *args, **kwargs)
 
-        with patch.object(self.mod.os, 'O_NOFOLLOW', 0, create=True), patch.object(self.mod.os, 'open', replace_before_open):
+        with patch.object(self.mod.os, 'O_NOFOLLOW', 0, create=True), patch.object(self.mod, '_open_recovered_stage', replace_before_open):
             result = self.mod.recover_push(root)
         self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
         self.assertEqual(os.lstat(stage).st_ino, replacement_identity)
@@ -329,14 +329,14 @@ class PushRecovery(unittest.TestCase):
     def test_stage_open_non_enoent_error_is_rejected_and_preserved(self):
         root, intent, name, payload = self.fixture()
         stage = self.state / 'files' / name; original = stage.read_bytes()
-        original_open = os.open
+        original_open = self.mod._open_recovered_stage
 
         def deny_stage(path, *args, **kwargs):
             if Path(path) == stage:
                 raise PermissionError('synthetic access denial')
             return original_open(path, *args, **kwargs)
 
-        with patch.object(self.mod.os, 'open', deny_stage):
+        with patch.object(self.mod, '_open_recovered_stage', deny_stage):
             result = self.mod.recover_push(root)
         self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
         self.assertEqual(stage.read_bytes(), original)

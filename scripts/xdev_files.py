@@ -277,6 +277,81 @@ def _push_result_payload(intent, transfer_id, result, bound):
     return row, out, err
 
 
+def _windows_stage_api():
+    """Lazy native APIs; only Windows cleanup opens a kernel handle."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [('attributes', wintypes.DWORD), ('creation', wintypes.FILETIME),
+                    ('access', wintypes.FILETIME), ('write', wintypes.FILETIME),
+                    ('volume', wintypes.DWORD), ('size_high', wintypes.DWORD),
+                    ('size_low', wintypes.DWORD), ('links', wintypes.DWORD),
+                    ('index_high', wintypes.DWORD), ('index_low', wintypes.DWORD)]
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
+    kernel.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel.GetFileType.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+
+    class NativeAPI:
+        def create(self, path, access, sharing, disposition, attributes):
+            handle = kernel.CreateFileW(path, access, sharing, None, disposition, attributes, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            return handle
+
+        def attributes(self, handle):
+            information = FileInformation()
+            if not kernel.GetFileInformationByHandle(handle, ctypes.byref(information)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return int(information.attributes)
+
+        def file_type(self, handle):
+            return int(kernel.GetFileType(handle))
+
+        def close(self, handle):
+            if not kernel.CloseHandle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+        def to_fd(self, handle, flags):
+            return msvcrt.open_osfhandle(handle, flags)
+
+    return NativeAPI()
+
+
+def _windows_open_recovered_stage(stage, flags):
+    """Read/share-delete without following a replaced reparse point."""
+    api = _windows_stage_api()
+    # GENERIC_READ, FILE_SHARE_READ|WRITE|DELETE, OPEN_EXISTING,
+    # FILE_FLAG_OPEN_REPARSE_POINT; security attributes are NULL/non-inheritable.
+    handle = api.create(os.fspath(stage), 0x80000000, 0x7, 3, 0x00200000)
+    try:
+        attributes = api.attributes(handle)
+        if attributes & (0x400 | 0x10) or api.file_type(handle) != 1:
+            raise ValueError('OWNED_STAGED_FILE_CHANGED')
+        fd = api.to_fd(handle, os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                       | getattr(os, 'O_NOINHERIT', 0))
+        handle = None  # open_osfhandle transferred ownership; os.close owns it.
+        return fd
+    finally:
+        if handle is not None:
+            api.close(handle)
+
+
+def _open_recovered_stage(stage, flags):
+    if os.name == 'nt':
+        return _windows_open_recovered_stage(stage, flags)
+    return os.open(stage, flags)
+
+
 def _recovered_stage_absent_after_enoent(stage, identity, expected):
     """After an actual open ENOENT, reject dangling/rebound pathname objects."""
     try:
@@ -293,7 +368,7 @@ def _recovered_stage_absent_after_enoent(stage, identity, expected):
 def _recovered_stage_absent(stage, flags, identity, expected):
     """An open ENOENT alone can be a dangling symlink when NOFOLLOW is absent."""
     try:
-        probe = os.open(stage, flags)
+        probe = _open_recovered_stage(stage, flags)
     except FileNotFoundError:
         return _recovered_stage_absent_after_enoent(stage, identity, expected)
     else:
@@ -319,7 +394,7 @@ def _remove_recovered_push_stage(stage, intent):
             raise ValueError(changed)
         flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
         try:
-            fd = os.open(stage, flags)
+            fd = _open_recovered_stage(stage, flags)
         except FileNotFoundError:
             if _recovered_stage_absent_after_enoent(stage, (before.st_dev, before.st_ino), before):
                 return

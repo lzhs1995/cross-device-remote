@@ -47,12 +47,12 @@ class CleanupTraceTests(unittest.TestCase):
         self.assertEqual((event['operation'], event['errno'], event['winerror']), ('unlink', errno.EACCES, 32))
 
     def test_open_access_denied_is_distinct_from_unlink_sharing(self):
-        original = os.open
+        original = self.case.mod._open_recovered_stage
         failure = PermissionError(errno.EACCES, 'UNIT_TEST_ONLY_ACCESS_DENIED'); failure.winerror = 5
         def open_file(path, *args, **kwargs):
             if Path(path) == self.stage: raise failure
             return original(path, *args, **kwargs)
-        with patch.object(self.case.mod.os, 'open', open_file): result, trace = self.recover()
+        with patch.object(self.case.mod, '_open_recovered_stage', open_file): result, trace = self.recover()
         self.assert_rejected(result)
         event = trace['events'][-1]
         self.assertEqual((event['operation'], event['errno'], event['winerror']), ('open', errno.EACCES, 5))

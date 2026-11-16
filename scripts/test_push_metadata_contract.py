@@ -62,7 +62,7 @@ class MetadataContract(unittest.TestCase):
         self.rejected(result);self.assertTrue(self.stage.exists())
 
     def stale_path(self, replacement=None, probe_error=None):
-        original_lstat,original_open=os.lstat,os.open
+        original_lstat,original_open=os.lstat,self.case.mod._open_recovered_stage
         original=original_lstat(self.stage);calls=0;opens=0
         stale=changed(original,st_ctime_ns=original.st_ctime_ns+1,st_nlink=0)
         def lstat(path,*args,**kwargs):
@@ -88,7 +88,7 @@ class MetadataContract(unittest.TestCase):
                     self.assertEqual(flags & getattr(os,'O_NOFOLLOW',0),getattr(os,'O_NOFOLLOW',0))
                     if probe_error:raise probe_error
             return original_open(path,flags,*args,**kwargs)
-        with patch.object(self.case.mod.os,'lstat',lstat),patch.object(self.case.mod.os,'open',open_file):
+        with patch.object(self.case.mod.os,'lstat',lstat),patch.object(self.case.mod,'_open_recovered_stage',open_file):
             result=self.case.mod.recover_push(self.root)
         self.assertEqual(opens,2)
         return result
@@ -132,35 +132,35 @@ class MetadataContract(unittest.TestCase):
         self.assertEqual(result['status'],'COMPLETE');self.assertFalse(self.stage.exists())
 
     def test_initial_open_dangling_rebound_rejects_without_retry_or_nofollow(self):
-        original=os.open;opens=0
+        original=self.case.mod._open_recovered_stage;opens=0
         def open_file(path,flags,*args,**kwargs):
             nonlocal opens
             if Path(path)==self.stage:
                 opens+=1
                 self.stage.unlink();self.stage.symlink_to(self.case.root/'absent-target')
             return original(path,flags,*args,**kwargs)
-        with patch.object(self.case.mod.os,'O_NOFOLLOW',0,create=True),patch.object(self.case.mod.os,'open',open_file):
+        with patch.object(self.case.mod.os,'O_NOFOLLOW',0,create=True),patch.object(self.case.mod,'_open_recovered_stage',open_file):
             result=self.case.mod.recover_push(self.root)
         self.rejected(result);self.assertTrue(self.stage.is_symlink());self.assertEqual(opens,1)
 
     def test_initial_open_actual_absence_accepts_without_retry(self):
-        original=os.open;opens=0
+        original=self.case.mod._open_recovered_stage;opens=0
         def open_file(path,flags,*args,**kwargs):
             nonlocal opens
             if Path(path)==self.stage:opens+=1;self.stage.unlink()
             return original(path,flags,*args,**kwargs)
-        with patch.object(self.case.mod.os,'open',open_file):result=self.case.mod.recover_push(self.root)
+        with patch.object(self.case.mod,'_open_recovered_stage',open_file):result=self.case.mod.recover_push(self.root)
         self.assertEqual(result['status'],'COMPLETE');self.assertEqual(opens,1);self.assertFalse(self.stage.exists())
 
     def test_initial_open_enoent_surviving_rebound_rejects(self):
-        original=os.open;opens=0
+        original=self.case.mod._open_recovered_stage;opens=0
         def open_file(path,flags,*args,**kwargs):
             nonlocal opens
             if Path(path)==self.stage:
                 opens+=1;self.stage.unlink();self.stage.write_bytes(b'rebound')
                 raise FileNotFoundError(errno.ENOENT,'UNIT_TEST_ONLY_LOOKUP_RACE')
             return original(path,flags,*args,**kwargs)
-        with patch.object(self.case.mod.os,'open',open_file):result=self.case.mod.recover_push(self.root)
+        with patch.object(self.case.mod,'_open_recovered_stage',open_file):result=self.case.mod.recover_push(self.root)
         self.rejected(result);self.assertEqual(opens,1);self.assertEqual(self.stage.read_bytes(),b'rebound')
 
 
