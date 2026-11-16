@@ -300,9 +300,9 @@ class TaskLifecycleTests(unittest.TestCase):
         path, raw = self.delayed_result
         path.write_bytes(raw)
         request = Path(result["task_receipt"]) / "reserve" / "INTENT.json"
-        record = json.loads(request.read_text())
+        record = json.loads(request.read_text(encoding="utf-8"))
         record["script"] += "# changed"
-        request.write_text(json.dumps(record))
+        request.write_text(json.dumps(record), encoding="utf-8")
         self.assertEqual(self.client.task_resume("archive")["reason"], "ORIGINAL_REQUEST_CHANGED")
         self.assertEqual([event[0] for event in self.events], ["reserve"])
 
