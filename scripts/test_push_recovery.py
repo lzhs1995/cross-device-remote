@@ -121,11 +121,19 @@ class PushRecovery(unittest.TestCase):
         self.assertTrue((root / 'RECOVERY.json').exists())
 
     def test_concurrent_reconciliation_only_removes_own_stage_once(self):
+        from push_cleanup_test_trace import StageCleanupTrace
         root, intent, stage, payload = self.fixture()
         unrelated = self.state / 'files/keep'; unrelated.write_bytes(b'other transfer')
-        with ThreadPoolExecutor(2) as pool:
-            results = list(pool.map(self.mod.recover_push, [root, root]))
-        self.assertTrue(all(x['ok'] for x in results), results)
+        with StageCleanupTrace(self.mod) as trace, ThreadPoolExecutor(2) as pool:
+            def recover(original_root):
+                trace.begin(self.state / 'files' / stage)
+                result = self.mod.recover_push(original_root)
+                return result, trace.snapshot()
+            observed = list(pool.map(recover, [root, root]))
+        results = [item[0] for item in observed]
+        failure_context = {'case': 'two_worker_reconciliation', 'results': results,
+                           'stage_io': [item[1] for item in observed]}
+        self.assertTrue(all(x['ok'] for x in results), failure_context)
         self.assertEqual(unrelated.read_bytes(), b'other transfer')
 
     def test_stage_disappears_after_lagging_observation_both_recoveries_complete(self):

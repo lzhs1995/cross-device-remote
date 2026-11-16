@@ -709,7 +709,9 @@ def run(args):
         raise ValueError("fanout run-id must be lowercase to avoid case-insensitive filesystem aliases")
     if not 1 <= args.max_polls <= 32:
         raise ValueError("--max-polls must be 1-32; each query also uses --http-timeout/--wait")
-    state = Path(args.state).expanduser().resolve()
+    state = Path(args.state).expanduser()
+    reject_case_alias(state)
+    state = state.resolve()
     reject_case_alias(state)
     binding = client.read(state / "BINDING.json")
     contract, sha, codes, receipt = contract_file(args.contract, load_code=args.action == "fanout-submit")
