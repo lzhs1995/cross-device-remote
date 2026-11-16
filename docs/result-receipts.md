@@ -42,7 +42,11 @@ mismatched-ID receipt. `wbagent result ID --wait SECONDS` waits only within its
 monotonic local budget and returns `124` if no valid receipt is available. It
 does not create another request or change the engine lifetime. Permission and
 other filesystem errors remain errors. Client integrations should use the same
-reader rather than accepting a file merely because it exists.
+reader rather than accepting a file merely because it exists. A missing receipt
+returns `None` only when its storage directory is valid. An absent, inaccessible
+or non-directory `results` path is a storage error, not a reason to keep polling
+or submit another command. Initialize private state before use as described in
+[installation](installation.md).
 
 The v1 signature still covers only `id`, `rc`, `out` and `err`. Comparing metadata
 does not authenticate it. The wire protocol contains no queue UUID, complete
@@ -73,6 +77,8 @@ Mac 回執服務保留原 ID 的第一份完整結果；相同完整 JSON 重傳
 獨立 `xdev-control/1` worker 則保留原 SQLite result、記錄 `publication_conflicts`，
 設 `sent=-1` 隔離，不能冒充 `sent=1` 已交付。兩者都不重跑原命令；衝突需核對原次，
 不能清標記、換 ID 或無限重傳。隔離投遞衝突不代表 UNKNOWN 預約已解除。
+只有有效儲存目錄內缺少回執才回傳 `None`；`results` 路徑不存在、無法存取或
+不是目錄時回報儲存錯誤，不轉成等待或重新提交。使用前須先初始化私有狀態。
 
 此變更保留 v1 簽名：`ms` 等額外欄位會比較但沒有簽名保護，也未新增 queue UUID、
 request 摘要或 execution 身分。更新須由原服務負責者在維護邊界套用，保留原 queue、

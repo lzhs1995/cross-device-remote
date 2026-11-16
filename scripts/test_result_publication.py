@@ -7,6 +7,7 @@ import base64
 import concurrent.futures
 import contextlib
 import copy
+import errno
 import hashlib
 import hmac
 import http.client
@@ -214,6 +215,96 @@ class PublicationTests(PublicationFixture):
         with self.assertRaises(OSError):
             self.subject.read_result(7)
         self.assertEqual(results.read_bytes(), b'fixture obstruction')
+
+    def test_non_directory_storage_reported_as_missing_still_raises(self):
+        results = self.root / 'results'
+        results.rmdir()
+        results.write_bytes(b'fixture obstruction')
+        original_read = Path.read_bytes
+        observed = []
+
+        def windows_missing_parent(path):
+            try:
+                return original_read(path)
+            except (NotADirectoryError, FileNotFoundError) as error:
+                if path != self.path():
+                    raise
+                # 仅模拟 Windows 的异常分类；真实父路径仍为普通文件。
+                observed.append(type(error).__name__)
+                raise FileNotFoundError(errno.ENOENT, 'modeled Windows nested-path lookup', str(path)) from error
+
+        with mock.patch.object(Path, 'read_bytes', windows_missing_parent):
+            with self.assertRaises(NotADirectoryError) as caught:
+                self.subject.read_result(7)
+        self.assertEqual(caught.exception.errno, errno.ENOTDIR)
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(results.read_bytes(), b'fixture obstruction')
+
+    def test_missing_results_directory_is_storage_error(self):
+        results = self.root / 'results'
+        results.rmdir()
+        with self.assertRaises(FileNotFoundError):
+            self.subject.read_result(7)
+        self.assertFalse(results.exists())
+
+    def test_missing_result_parent_stat_errors_propagate(self):
+        results = self.root / 'results'
+        original_stat = Path.stat
+        for error in (PermissionError(errno.EACCES, 'fixture denied'),
+                      OSError(errno.EIO, 'fixture I/O failure')):
+            with self.subTest(error=type(error).__name__):
+                def unavailable_storage(path, *args, **kwargs):
+                    if path == results:
+                        raise error
+                    return original_stat(path, *args, **kwargs)
+
+                with mock.patch.object(Path, 'stat', unavailable_storage):
+                    with self.assertRaises(OSError) as caught:
+                        self.subject.read_result(7)
+                self.assertIs(caught.exception, error)
+        self.assertEqual(list(results.iterdir()), [])
+
+    def test_result_read_permission_error_propagates_unchanged(self):
+        original_read = Path.read_bytes
+        error = PermissionError(errno.EACCES, 'fixture denied')
+
+        def denied_result(path):
+            if path == self.path():
+                raise error
+            return original_read(path)
+
+        with mock.patch.object(Path, 'read_bytes', denied_result):
+            with self.assertRaises(PermissionError) as caught:
+                self.subject.read_result(7)
+        self.assertIs(caught.exception, error)
+        self.assertFalse(self.path().exists())
+
+    def _link_results_directory(self, target):
+        results = self.root / 'results'
+        results.rmdir()
+        try:
+            results.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            if error.errno in (errno.EPERM, errno.EACCES, errno.ENOSYS) or getattr(error, 'winerror', None) == 1314:
+                self.skipTest('directory symlinks unavailable on this test host')
+            raise
+        return results
+
+    def test_dangling_results_directory_is_storage_error(self):
+        target = self.root / 'missing-results-target'
+        results = self._link_results_directory(target)
+        with self.assertRaises(FileNotFoundError):
+            self.subject.read_result(7)
+        self.assertTrue(results.is_symlink())
+        self.assertFalse(target.exists())
+
+    def test_missing_result_in_linked_directory_still_returns_none(self):
+        target = self.root / 'linked-results-target'
+        target.mkdir()
+        results = self._link_results_directory(target)
+        self.assertIsNone(self.subject.read_result(7))
+        self.assertTrue(results.is_symlink())
+        self.assertEqual(list(target.iterdir()), [])
 
     def test_conflict_storage_error_does_not_modify_winner_or_claim_success(self):
         winner = self.result()

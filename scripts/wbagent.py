@@ -6,7 +6,7 @@ serve：只接受 --allow-ip 的连接；GET /next 长轮询取下一条已签�
 run：把一个 PowerShell 脚本签名入队，等回执，打印 stdout/stderr，退出码同远端。
 签名：HMAC-SHA256(secret, "cmd|id|timeout|script_b64") / ("res|id|rc|out_b64|err_b64")。
 """
-import argparse, base64, hashlib, hmac, json, os, sys, tempfile, time, uuid
+import argparse, base64, errno, hashlib, hmac, json, os, stat, sys, tempfile, time, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -165,16 +165,21 @@ def publish_result(record):
 
 
 def read_result(i):
-    """Return a validated original receipt, or None while absent/invalid.
+    """Return a validated original receipt, or None while the receipt is absent/invalid.
 
     Legacy servers may still be writing a partial file. Reading never repairs
-    it or resubmits work. Filesystem failures other than missing remain errors.
+    it or resubmits work. Missing receipts wait only within valid storage;
+    absent, inaccessible or non-directory storage remains a filesystem error.
     """
     if type(i) is not int or i <= 0:
         raise ValueError("invalid original id")
     try:
         raw = (ROOT / "results" / f"{i}.json").read_bytes()
     except FileNotFoundError:
+        # Windows 也可能将父路径为普通文件报告为缺失；只在存储目录有效时等待回执。
+        directory = ROOT / "results"
+        if not stat.S_ISDIR(directory.stat().st_mode):
+            raise NotADirectoryError(errno.ENOTDIR, "result storage is not a directory", str(directory))
         return None
     try:
         record = _json_record(raw.decode("utf-8"))
