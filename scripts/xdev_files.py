@@ -453,6 +453,15 @@ def _remove_recovered_push_stage(stage, intent):
             stage.unlink()
         except FileNotFoundError:
             return
+        except PermissionError as error:
+            # Windows 并发删除可返回错误5；仅新鲜无跟随路径观察确认缺失时完成。
+            if getattr(error, 'winerror', None) != 5:
+                raise
+            try:
+                os.lstat(stage)
+            except FileNotFoundError:
+                return
+            raise
     except OSError as error:
         raise ValueError(changed) from error
 

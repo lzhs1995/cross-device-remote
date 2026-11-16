@@ -46,6 +46,22 @@ class CleanupTraceTests(unittest.TestCase):
         event = trace['events'][-1]
         self.assertEqual((event['operation'], event['errno'], event['winerror']), ('unlink', errno.EACCES, 32))
 
+    def test_unlink_access_denied_preserves_error5_and_checks_surviving_path(self):
+        original = Path.unlink
+        failure = PermissionError(errno.EACCES, 'UNIT_TEST_ONLY_UNLINK_ACCESS_DENIED')
+        failure.winerror = 5
+        def unlink(path, *args, **kwargs):
+            if path == self.stage: raise failure
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', unlink): result, trace = self.recover()
+        self.assert_rejected(result)
+        self.assertEqual([(e['operation'], e['outcome']) for e in trace['events'][-2:]],
+                         [('unlink', 'ERROR'), ('lstat', 'OK')])
+        event = trace['events'][-2]
+        self.assertEqual((event['errno'], event['winerror']), (errno.EACCES, 5))
+        self.assertEqual(sum(e['operation'] == 'unlink' for e in trace['events']), 1)
+        self.assertEqual(sum(e['operation'] == 'open' for e in trace['events']), 1)
+
     def test_open_access_denied_is_distinct_from_unlink_sharing(self):
         original = self.case.mod._open_recovered_stage
         failure = PermissionError(errno.EACCES, 'UNIT_TEST_ONLY_ACCESS_DENIED'); failure.winerror = 5

@@ -310,6 +310,147 @@ class PushRecovery(unittest.TestCase):
                 else:
                     self.assertEqual(hashlib.sha256(stage.read_bytes()).hexdigest(), intent['sha256'])
 
+    def test_stage_unlink_windows_denied_after_peer_unlink_reconciles_original(self):
+        from push_cleanup_test_trace import StageCleanupTrace
+        root, intent, name, payload = self.fixture()
+        stage = self.state / 'files' / name
+        unrelated = self.state / 'files/keep'; unrelated.write_bytes(b'other transfer')
+        old_outcome = (root / 'OUTCOME.json').read_bytes()
+        ready, cleaned = threading.Event(), threading.Event()
+        role = threading.local()
+        original_unlink = Path.unlink
+        calls = {'losing_unlink': 0, 'winning_unlink': 0}
+
+        def unlink(path, *args, **kwargs):
+            if path == stage:
+                if getattr(role, 'lagging', False):
+                    calls['losing_unlink'] += 1
+                    ready.set()
+                    if not cleaned.wait(timeout=10):
+                        raise AssertionError('peer cleanup did not finish')
+                    # 对方完成真实恢复和删除后，仅模拟已观测的 Windows 错误5。
+                    raise self._modeled_windows_denied()
+                calls['winning_unlink'] += 1
+            return original_unlink(path, *args, **kwargs)
+
+        def lagging(trace):
+            role.lagging = True
+            trace.begin(stage)
+            result = self.mod.recover_push(root)
+            return result, trace.snapshot()
+
+        def leading(trace):
+            if not ready.wait(timeout=10):
+                raise AssertionError('lagging worker did not reach unlink')
+            trace.begin(stage)
+            try:
+                result = self.mod.recover_push(root)
+                return result, trace.snapshot()
+            finally:
+                cleaned.set()
+
+        with patch.object(Path, 'unlink', unlink), StageCleanupTrace(self.mod) as trace, \
+                patch.object(self.mod, 'run_ps') as remote, ThreadPoolExecutor(2) as pool:
+            slow, fast = pool.submit(lagging, trace), pool.submit(leading, trace)
+            observed = [slow.result(timeout=15), fast.result(timeout=15)]
+            remote.assert_not_called()
+        results = [item[0] for item in observed]
+        self.assertTrue(all(row.get('ok') is True and row['status'] == 'COMPLETE' for row in results), observed)
+        self.assertTrue(all(row['job_id'] == 77 and row['resubmitted'] is False
+                            and row['remote_operations'] == 0 for row in results))
+        self.assertEqual(calls, {'losing_unlink': 1, 'winning_unlink': 1})
+        loser, winner = [item[1]['events'] for item in observed]
+        self.assertEqual([(e['operation'], e['outcome']) for e in loser[-2:]],
+                         [('unlink', 'ERROR'), ('lstat', 'ERROR')])
+        self.assertEqual((loser[-2]['errno'], loser[-2]['winerror']), (errno.EACCES, 5))
+        self.assertEqual(loser[-1]['error_type'], 'FileNotFoundError')
+        for events in (loser, winner):
+            self.assertEqual(sum(e['operation'] == 'open' for e in events), 1)
+            self.assertEqual(sum(e['operation'] == 'unlink' for e in events), 1)
+            self.assertEqual(sum(e['operation'] == 'close' for e in events), 1)
+        self.assertFalse(stage.exists())
+        self.assertEqual(unrelated.read_bytes(), b'other transfer')
+        self.assertEqual((root / 'OUTCOME.json').read_bytes(), old_outcome)
+        self.assertTrue((root / 'RECOVERY.json').is_file())
+
+    def test_stage_unlink_windows_denied_rejects_objects_and_probe_errors(self):
+        kinds = ('original', 'replacement', 'directory', 'dangling_link', 'stale_unlinked',
+                 'stat_denied', 'stat_io', 'stat_not_directory')
+        for index, kind in enumerate(kinds):
+            with self.subTest(kind=kind):
+                root, intent, name, payload = self.fixture(identity=f'{index:032x}')
+                stage = self.state / 'files' / name
+                original_lstat, original_unlink = os.lstat, Path.unlink
+                before = original_lstat(stage)
+                calls = {'unlink': 0, 'probe': 0}
+
+                def unlink(path, *args, **kwargs):
+                    if path != stage:
+                        return original_unlink(path, *args, **kwargs)
+                    calls['unlink'] += 1
+                    if calls['unlink'] != 1:
+                        raise AssertionError('cleanup must not retry unlink')
+                    if kind in ('replacement', 'directory'):
+                        original_unlink(stage)
+                        if kind == 'replacement':
+                            stage.write_bytes(b'rebound bytes must survive')
+                        else:
+                            stage.mkdir()
+                    raise self._modeled_windows_denied()
+
+                def lstat(path, *args, **kwargs):
+                    if Path(path) == stage and calls['unlink']:
+                        calls['probe'] += 1
+                        if kind.startswith('stat_'):
+                            error = {'stat_denied': PermissionError(errno.EACCES, 'denied stat'),
+                                     'stat_io': OSError(errno.EIO, 'failed stat'),
+                                     'stat_not_directory': NotADirectoryError(errno.ENOTDIR, 'parent replaced')}[kind]
+                            raise error
+                        if kind in ('dangling_link', 'stale_unlinked'):
+                            # 无需宿主机符号链接权限的对象/缓存元数据负控制。
+                            fields = {key: getattr(before, key) for key in
+                                      ('st_mode', 'st_dev', 'st_ino', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                            if kind == 'dangling_link':
+                                fields['st_mode'] = stat.S_IFLNK | 0o777
+                            else:
+                                fields['st_nlink'] = 0
+                            return types.SimpleNamespace(**fields)
+                    return original_lstat(path, *args, **kwargs)
+
+                with patch.object(Path, 'unlink', unlink), patch.object(self.mod.os, 'lstat', lstat):
+                    result = self.mod.recover_push(root)
+                self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
+                self.assertEqual(calls, {'unlink': 1, 'probe': 1})
+                self.assertTrue((root / 'RECOVERY.json').is_file())
+                if kind == 'directory':
+                    self.assertTrue(stage.is_dir())
+                else:
+                    expected = b'rebound bytes must survive' if kind == 'replacement' else b'complete uploaded bytes'
+                    self.assertEqual(stage.read_bytes(), expected)
+
+    def test_stage_unlink_other_denials_reject_even_after_path_disappears(self):
+        for index, winerror in enumerate((None, 32)):
+            with self.subTest(winerror=winerror):
+                root, intent, name, payload = self.fixture(identity=f'{index:032x}')
+                stage = self.state / 'files' / name
+                original_unlink = Path.unlink
+                calls = 0
+
+                def unlink(path, *args, **kwargs):
+                    nonlocal calls
+                    if path != stage:
+                        return original_unlink(path, *args, **kwargs)
+                    calls += 1
+                    original_unlink(stage)
+                    raise self._modeled_windows_denied(winerror)
+
+                with patch.object(Path, 'unlink', unlink):
+                    result = self.mod.recover_push(root)
+                self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
+                self.assertEqual(calls, 1)
+                self.assertFalse(stage.exists())
+                self.assertTrue((root / 'RECOVERY.json').is_file())
+
     def test_stage_missing_at_final_lstat_or_unlink_is_already_clean(self):
         for index, point in enumerate(('lstat', 'unlink')):
             with self.subTest(point=point):
