@@ -174,8 +174,9 @@ class PushRecovery(unittest.TestCase):
         self.assertEqual(unrelated.read_bytes(), b'other transfer')
 
     def test_recovery_cleanup_concurrency_24_rounds_four_workers(self):
+        from push_cleanup_test_trace import StageCleanupTrace
         unrelated = self.state / 'files/keep'; unrelated.write_bytes(b'other transfer')
-        with patch.object(self.mod, 'run_ps') as remote, ThreadPoolExecutor(4) as pool:
+        with StageCleanupTrace(self.mod) as trace, patch.object(self.mod, 'run_ps') as remote, ThreadPoolExecutor(4) as pool:
             for index in range(24):
                 with self.subTest(round=index):
                     root, intent, name, payload = self.fixture(identity=f'{index:032x}')
@@ -183,13 +184,18 @@ class PushRecovery(unittest.TestCase):
                     start = threading.Barrier(4)
 
                     def recover():
+                        trace.begin(self.state / 'files' / name)
                         start.wait(timeout=10)
-                        return self.mod.recover_push(root)
+                        result = self.mod.recover_push(root)
+                        return result, trace.snapshot()
 
                     futures = [pool.submit(recover) for _ in range(4)]
-                    results = [f.result(timeout=15) for f in futures]
-                    self.assertTrue(all(x.get('ok') is True and x['status'] == 'COMPLETE' for x in results), results)
-                    self.assertTrue(all(x == results[0] for x in results), results)
+                    observed = [f.result(timeout=15) for f in futures]
+                    results = [item[0] for item in observed]
+                    failure_context = {'round': index, 'results': results,
+                                       'stage_io': [item[1] for item in observed]}
+                    self.assertTrue(all(x.get('ok') is True and x['status'] == 'COMPLETE' for x in results), failure_context)
+                    self.assertTrue(all(x == results[0] for x in results), failure_context)
                     self.assertFalse((self.state / 'files' / name).exists())
                     self.assertEqual((root / 'OUTCOME.json').read_bytes(), original_outcome)
                     self.assertEqual(unrelated.read_bytes(), b'other transfer')
