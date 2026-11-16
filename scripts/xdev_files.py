@@ -277,6 +277,30 @@ def _push_result_payload(intent, transfer_id, result, bound):
     return row, out, err
 
 
+def _recovered_stage_absent_after_enoent(stage, identity, expected):
+    """After an actual open ENOENT, reject dangling/rebound pathname objects."""
+    try:
+        remaining = os.lstat(stage)
+    except FileNotFoundError:
+        return True
+    return (stat.S_ISREG(remaining.st_mode)
+            and (remaining.st_dev, remaining.st_ino) == identity
+            and remaining.st_nlink == 0
+            and (remaining.st_size, remaining.st_mtime_ns)
+            == (expected.st_size, expected.st_mtime_ns))
+
+
+def _recovered_stage_absent(stage, flags, identity, expected):
+    """An open ENOENT alone can be a dangling symlink when NOFOLLOW is absent."""
+    try:
+        probe = os.open(stage, flags)
+    except FileNotFoundError:
+        return _recovered_stage_absent_after_enoent(stage, identity, expected)
+    else:
+        os.close(probe)
+        return False
+
+
 def _remove_recovered_push_stage(stage, intent):
     """Remove only this completed transfer's unchanged, regular staged file.
 
@@ -297,7 +321,9 @@ def _remove_recovered_push_stage(stage, intent):
         try:
             fd = os.open(stage, flags)
         except FileNotFoundError:
-            return
+            if _recovered_stage_absent_after_enoent(stage, (before.st_dev, before.st_ino), before):
+                return
+            raise ValueError(changed)
         try:
             opened = os.fstat(fd)
             identity = (opened.st_dev, opened.st_ino)
@@ -314,6 +340,16 @@ def _remove_recovered_push_stage(stage, intent):
                 size += len(data)
             if size != intent['bytes'] or digest.hexdigest() != intent['sha256']:
                 raise ValueError(changed)
+            after_read = os.fstat(fd)
+            if (not stat.S_ISREG(after_read.st_mode)
+                    or (after_read.st_dev, after_read.st_ino) != identity
+                    or (after_read.st_size, after_read.st_mtime_ns, after_read.st_ctime_ns)
+                    != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)):
+                # A peer may have unlinked the file; prove absence with open,
+                # not another cached pathname metadata observation.
+                if _recovered_stage_absent(stage, flags, identity, opened):
+                    return
+                raise ValueError(changed)
         finally:
             os.close(fd)
         try:
@@ -322,12 +358,11 @@ def _remove_recovered_push_stage(stage, intent):
             return
         if (not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity
                 or (current.st_size, current.st_mtime_ns, current.st_ctime_ns)
-                != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)):
-            # A racing unlink can update ctime after lstat resolves the inode.
-            # Accept only a fresh ENOENT; a surviving/rebound path still rejects.
-            try:
-                os.lstat(stage)
-            except FileNotFoundError:
+                != (opened.st_size, opened.st_mtime_ns, before.st_ctime_ns)):
+            # Compare metadata only within its API: Windows pathname and
+            # descriptor ctime can differ even for the same unchanged file.
+            # Accept only exact open ENOENT; surviving/rebound paths reject.
+            if _recovered_stage_absent(stage, flags, identity, before):
                 return
             raise ValueError(changed)
         try:
