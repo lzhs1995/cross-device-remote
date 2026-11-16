@@ -69,7 +69,7 @@ class PushRecovery(unittest.TestCase):
         staged = self.mod._push_staged(intent)
         (self.state / 'files' / staged).write_bytes(data)
         script = self.mod._push_script(dest, intent['sha256'], identity, staged, False, current)
-        (step / 'request.ps1').write_text(script)
+        (step / 'request.ps1').write_bytes(script.encode('utf-8'))
         self.write(root / 'INTENT.json', intent)
         self.write(step / 'INTENT.json', dict(script_sha256=hashlib.sha256(script.encode()).hexdigest(),
                                              options=dict(timeout=120), no_automatic_retry=True))

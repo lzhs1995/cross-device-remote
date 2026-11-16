@@ -46,7 +46,7 @@ class _Transfer:
         self.sequence += 1
         root = self.root / f'{self.sequence:04d}-{label}'
         root.mkdir()
-        (root / 'request.ps1').write_text(script, encoding='utf-8')
+        (root / 'request.ps1').write_bytes(script.encode('utf-8'))
         _write_new(root / 'INTENT.json', dict(script_sha256=hashlib.sha256(script.encode()).hexdigest(),
                                            options=kwargs, no_automatic_retry=True))
         result = run_ps(script, **kwargs)
@@ -323,6 +323,12 @@ def _remove_recovered_push_stage(stage, intent):
         if (not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity
                 or (current.st_size, current.st_mtime_ns, current.st_ctime_ns)
                 != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)):
+            # A racing unlink can update ctime after lstat resolves the inode.
+            # Accept only a fresh ENOENT; a surviving/rebound path still rejects.
+            try:
+                os.lstat(stage)
+            except FileNotFoundError:
+                return
             raise ValueError(changed)
         try:
             stage.unlink()
