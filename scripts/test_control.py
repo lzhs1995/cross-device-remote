@@ -117,18 +117,35 @@ class ControlTests(unittest.TestCase):
 
     def test_status_and_short_control_complete_while_long_job_runs(self):
         marker = self.root / "long-started"
-        body = "from pathlib import Path; import time; Path(" + repr(str(marker)) + ").write_text('started'); time.sleep(1.4)"
-        self.client.call("submit", spec("long", resources=["long"], code=body))
-        self.start_worker()
-        self.until(marker.exists)
-        start = time.monotonic()
-        status = self.client.call("status", {"key": "long"})
-        self.assertEqual(status["state"], "CLAIMED")
-        self.assertLess(time.monotonic() - start, 0.5)
-        self.client.call("submit", spec("short", resources=["short"], code="print('control')"))
-        self.assertEqual(self.terminal("short")["state"], "SUCCEEDED")
-        self.assertEqual(self.client.call("status", {"key": "long"})["state"], "CLAIMED")
-        self.terminal("long")
+        release = self.root / "long-release"
+        # 用显式释放保持长任务；机器负载不应令固定睡眠提前结束。
+        body = ("from pathlib import Path\nimport time\n"
+                "release = Path(" + repr(str(release)) + ")\n"
+                "deadline = time.monotonic() + 60\n"
+                "Path(" + repr(str(marker)) + ").write_text('started')\n"
+                "while not release.exists():\n"
+                "    if time.monotonic() >= deadline:\n"
+                "        raise SystemExit('LONG_FIXTURE_RELEASE_TIMEOUT')\n"
+                "    time.sleep(0.02)\n"
+                "print('released')\n")
+        self.client.call("submit", spec("long", resources=["long"], code=body, timeout=75))
+        try:
+            self.start_worker()
+            self.until(marker.exists)
+            start = time.monotonic()
+            status = self.client.call("status", {"key": "long"})
+            self.assertEqual(status["state"], "CLAIMED")
+            self.assertLess(time.monotonic() - start, 0.5)
+            self.client.call("submit", spec("short", resources=["short"], code="print('control')"))
+            self.assertEqual(self.terminal("short")["state"], "SUCCEEDED")
+            self.assertFalse(release.exists())
+            self.assertEqual(self.client.call("status", {"key": "long"})["state"], "CLAIMED")
+        finally:
+            # 即使断言失败，也释放本测试孩子并按原 key 核收终态。
+            release.touch()
+            long_result = self.terminal("long")
+        self.assertEqual(long_result["state"], "SUCCEEDED", long_result)
+        self.assertEqual(base64.b64decode(long_result["result"]["stdout_b64"]).strip(), b"released")
 
     def test_submit_duplicate_is_idempotent_conflicting_id_preserves_original(self):
         original = spec("stable", resources=["a"])

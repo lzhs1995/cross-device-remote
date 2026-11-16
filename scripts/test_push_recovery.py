@@ -1,11 +1,13 @@
 """Read-only original-result recovery tests; synthetic queue, no live requests."""
 import base64
+import errno
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import hmac
 import importlib.util
 import json
 import os
+import stat
 from pathlib import Path
 import sys
 import tempfile
@@ -333,6 +335,180 @@ class PushRecovery(unittest.TestCase):
                     result = self.mod.recover_push(root)
                 self.assertEqual((result['ok'], result['status']), (True, 'COMPLETE'), result)
                 self.assertFalse(stage.exists())
+
+    @staticmethod
+    def _modeled_windows_denied(winerror=5):
+        error = PermissionError(errno.EACCES, 'modeled Windows open denial')
+        error.winerror = winerror
+        return error
+
+    def test_stage_open_windows_denied_after_peer_unlink_reconciles_original(self):
+        root, intent, name, payload = self.fixture()
+        stage = self.state / 'files' / name
+        unrelated = self.state / 'files/keep'; unrelated.write_bytes(b'other transfer')
+        old_outcome = (root / 'OUTCOME.json').read_bytes()
+        ready, cleaned = threading.Event(), threading.Event()
+        role = threading.local()
+        calls = {'lagging_open': 0, 'absence_lstat': 0, 'unlink': 0}
+        original_open = self.mod._open_recovered_stage
+        original_lstat, original_unlink = os.lstat, Path.unlink
+
+        def open_stage(path, flags):
+            if Path(path) == stage and getattr(role, 'lagging', False):
+                calls['lagging_open'] += 1
+                ready.set()
+                if not cleaned.wait(timeout=10):
+                    raise AssertionError('peer cleanup did not finish')
+                # 真正的对方恢复已删除原文件；仅模拟已观测的 Windows 错误分类。
+                role.failed_open = True
+                raise self._modeled_windows_denied()
+            return original_open(path, flags)
+
+        def lstat(path, *args, **kwargs):
+            if Path(path) == stage and getattr(role, 'failed_open', False):
+                calls['absence_lstat'] += 1
+            return original_lstat(path, *args, **kwargs)
+
+        def unlink(path, *args, **kwargs):
+            if path == stage:
+                calls['unlink'] += 1
+            return original_unlink(path, *args, **kwargs)
+
+        def lagging():
+            role.lagging = True
+            return self.mod.recover_push(root)
+
+        def leading():
+            if not ready.wait(timeout=10):
+                raise AssertionError('lagging worker did not reach original open')
+            try:
+                return self.mod.recover_push(root)
+            finally:
+                cleaned.set()
+
+        with patch.object(self.mod, '_open_recovered_stage', open_stage), \
+                patch.object(self.mod.os, 'lstat', lstat), patch.object(Path, 'unlink', unlink), \
+                patch.object(self.mod, 'run_ps') as remote, ThreadPoolExecutor(2) as pool:
+            slow, fast = pool.submit(lagging), pool.submit(leading)
+            results = [slow.result(timeout=15), fast.result(timeout=15)]
+            remote.assert_not_called()
+        self.assertTrue(all(row.get('ok') is True and row['status'] == 'COMPLETE' for row in results), results)
+        self.assertTrue(all(row['job_id'] == 77 and row['resubmitted'] is False
+                            and row['remote_operations'] == 0 for row in results))
+        self.assertEqual(calls, {'lagging_open': 1, 'absence_lstat': 1, 'unlink': 1})
+        self.assertFalse(stage.exists())
+        self.assertEqual(unrelated.read_bytes(), b'other transfer')
+        self.assertEqual((root / 'OUTCOME.json').read_bytes(), old_outcome)
+        self.assertTrue((root / 'RECOVERY.json').is_file())
+
+    def test_stage_open_windows_denied_never_accepts_surviving_path(self):
+        for index, kind in enumerate(('original', 'replacement', 'directory', 'dangling_link', 'stale_unlinked')):
+            with self.subTest(kind=kind):
+                root, intent, name, payload = self.fixture(identity=f'{index:032x}')
+                stage = self.state / 'files' / name
+                original_lstat, original_unlink = os.lstat, Path.unlink
+                before = original_lstat(stage)
+                opened = False
+                probes = 0
+
+                def denied(path, flags):
+                    nonlocal opened
+                    self.assertEqual(Path(path), stage)
+                    self.assertFalse(opened, 'cleanup must not retry open')
+                    opened = True
+                    if kind in ('replacement', 'directory'):
+                        original_unlink(stage)
+                        if kind == 'replacement':
+                            stage.write_bytes(b'rebound bytes must survive')
+                        else:
+                            stage.mkdir()
+                    raise self._modeled_windows_denied()
+
+                def lstat(path, *args, **kwargs):
+                    nonlocal probes
+                    if Path(path) == stage and opened:
+                        probes += 1
+                        if kind in ('dangling_link', 'stale_unlinked'):
+                            # 可移植负控制：路径返回对象（包括缓存 nlink=0）绝非 ENOENT。
+                            fields = {key: getattr(before, key) for key in
+                                      ('st_mode', 'st_dev', 'st_ino', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                            if kind == 'dangling_link':
+                                fields['st_mode'] = stat.S_IFLNK | 0o777
+                            else:
+                                fields['st_nlink'] = 0
+                            return types.SimpleNamespace(**fields)
+                    return original_lstat(path, *args, **kwargs)
+
+                stage_removals = []
+
+                def unlink(path, *args, **kwargs):
+                    if path == stage:
+                        stage_removals.append(path)
+                    return original_unlink(path, *args, **kwargs)
+
+                with patch.object(self.mod, '_open_recovered_stage', denied), \
+                        patch.object(self.mod.os, 'lstat', lstat), patch.object(Path, 'unlink', unlink):
+                    result = self.mod.recover_push(root)
+                self.assertEqual(stage_removals, [])
+                self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
+                self.assertEqual(probes, 1)
+                self.assertTrue((root / 'RECOVERY.json').is_file())
+                if kind == 'directory':
+                    self.assertTrue(stage.is_dir())
+                else:
+                    expected = b'rebound bytes must survive' if kind == 'replacement' else b'complete uploaded bytes'
+                    self.assertEqual(stage.read_bytes(), expected)
+
+    def test_stage_open_windows_denied_absence_probe_errors_stay_rejected(self):
+        for index, error in enumerate((PermissionError(errno.EACCES, 'denied lstat'),
+                                      OSError(errno.EIO, 'failed lstat'),
+                                      NotADirectoryError(errno.ENOTDIR, 'obstructed parent'))):
+            with self.subTest(error=type(error).__name__):
+                root, intent, name, payload = self.fixture(identity=f'{index:032x}')
+                stage = self.state / 'files' / name
+                original_lstat = os.lstat
+                opened = False
+                probes = 0
+
+                def denied(path, flags):
+                    nonlocal opened
+                    opened = True
+                    raise self._modeled_windows_denied()
+
+                def lstat(path, *args, **kwargs):
+                    nonlocal probes
+                    if Path(path) == stage and opened:
+                        probes += 1
+                        raise error
+                    return original_lstat(path, *args, **kwargs)
+
+                with patch.object(self.mod, '_open_recovered_stage', denied), patch.object(self.mod.os, 'lstat', lstat):
+                    result = self.mod.recover_push(root)
+                self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
+                self.assertEqual(probes, 1)
+                self.assertEqual(stage.read_bytes(), b'complete uploaded bytes')
+                self.assertTrue((root / 'RECOVERY.json').is_file())
+
+    def test_stage_open_other_denials_reject_even_after_path_disappears(self):
+        for index, winerror in enumerate((None, 32)):
+            with self.subTest(winerror=winerror):
+                root, intent, name, payload = self.fixture(identity=f'{index:032x}')
+                stage = self.state / 'files' / name
+                error = self._modeled_windows_denied(winerror)
+                calls = 0
+
+                def denied(path, flags):
+                    nonlocal calls
+                    calls += 1
+                    stage.unlink()
+                    raise error
+
+                with patch.object(self.mod, '_open_recovered_stage', denied):
+                    result = self.mod.recover_push(root)
+                self.assertEqual((result['status'], result['reason']), ('REJECTED', 'OWNED_STAGED_FILE_CHANGED'))
+                self.assertEqual(calls, 1)
+                self.assertFalse(stage.exists())
+                self.assertTrue((root / 'RECOVERY.json').is_file())
 
     def test_stage_open_non_enoent_error_is_rejected_and_preserved(self):
         root, intent, name, payload = self.fixture()

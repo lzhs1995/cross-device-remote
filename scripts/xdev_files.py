@@ -399,6 +399,15 @@ def _remove_recovered_push_stage(stage, intent):
             if _recovered_stage_absent_after_enoent(stage, (before.st_dev, before.st_ino), before):
                 return
             raise ValueError(changed)
+        except PermissionError as error:
+            # Windows 删除挂起可返回 ERROR_ACCESS_DENIED；只接受新鲜路径观察明确缺失。
+            if getattr(error, 'winerror', None) != 5:
+                raise
+            try:
+                os.lstat(stage)
+            except FileNotFoundError:
+                return
+            raise
         try:
             opened = os.fstat(fd)
             identity = (opened.st_dev, opened.st_ino)

@@ -54,7 +54,9 @@ class CleanupTraceTests(unittest.TestCase):
             return original(path, *args, **kwargs)
         with patch.object(self.case.mod, '_open_recovered_stage', open_file): result, trace = self.recover()
         self.assert_rejected(result)
-        event = trace['events'][-1]
+        self.assertEqual([(e['operation'], e['outcome']) for e in trace['events']],
+                         [('lstat', 'OK'), ('open', 'ERROR'), ('lstat', 'OK')])
+        event = trace['events'][1]
         self.assertEqual((event['operation'], event['errno'], event['winerror']), ('open', errno.EACCES, 5))
 
     def test_fstat_identity_mismatch_records_both_identities(self):
