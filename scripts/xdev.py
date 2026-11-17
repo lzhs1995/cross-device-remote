@@ -77,7 +77,7 @@ def main(argv=None) -> int:
     if a.cmd in ("run", "detach"):
         if not (a.file or a.command):
             ap.error(f"{a.cmd} needs a file or -c")
-        body = Path(a.file).read_text(encoding="utf-8") if a.file else a.command
+        body = Path(a.file).read_text(encoding="utf-8").removeprefix("\ufeff") if a.file else a.command
         if a.cmd == "detach":
             import xdev_tasks
             return xdev_tasks.detach(a.name, body)

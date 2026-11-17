@@ -21,7 +21,7 @@ def main():
                      'test_transfer_concurrency.py', 'test_push_shared_delete.py', 'test_push_recovery.py', 'test_push_cleanup_interleaving.py',
                      'test_push_bytes_contract.py', 'test_push_cleanup_trace.py', 'test_push_metadata_contract.py',
                      'test_push_receipt_callback.py',
-                     'test_task_lifecycle.py', 'test_task_cli.py', 'test_enqueue_concurrency.py', 'test_fanout.py', 'test_control.py',
+                     'test_task_lifecycle.py', 'test_task_cli.py', 'test_file_entry_bom.py', 'test_enqueue_concurrency.py', 'test_fanout.py', 'test_control.py',
                      'test_result_publication.py']]
         commands.append([sys.executable, '-B', str(ROOT / 'scripts/test_result_read.py'),
                          str(ROOT / 'scripts/xdev_core.py'), str(Path(tmp) / 'receipt.json')])

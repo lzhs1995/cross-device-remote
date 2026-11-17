@@ -874,7 +874,7 @@ def run(args) -> int:
         if bool(args.file) == bool(args.command):
             return fail("XDEV_TASK_REFUSED task-submit needs exactly one file or -c/--command", 2)
         try:
-            body = Path(args.file).expanduser().read_text(encoding="utf-8") if args.file else args.command
+            body = Path(args.file).expanduser().read_text(encoding="utf-8").removeprefix("\ufeff") if args.file else args.command
         except OSError as exc:
             return fail(f"XDEV_TASK_REFUSED {exc}", 2)
         return print_summary(task_submit(args.input, body, args.name))
