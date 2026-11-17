@@ -75,11 +75,11 @@ def mplus(inp: str, inputs: list, out_dir: str, max_seconds: int) -> int:
     summary = task([inp, *inputs], cmd, out_dir, max_seconds=max_seconds)
     out_file = Path(out_dir).expanduser() / outname
     if summary.get("ok") and out_file.is_file():
-        text = out_file.read_text(encoding="utf-8", errors="replace")
-        errors = [ln.strip() for ln in text.splitlines() if "*** ERROR" in ln]
-        summary.update(mplus_out=str(out_file), terminated_normally="THE MODEL ESTIMATION TERMINATED NORMALLY" in text,
-                       mplus_errors=errors[:10])
-        if errors or not summary["terminated_normally"]:
+        from xdev_mplus_batch import check_out
+        chk = check_out(out_file.read_text(encoding="utf-8", errors="replace"))
+        summary.update(mplus_out=str(out_file), terminated_normally=chk["terminated_normally"],
+                       monte_carlo=chk["monte_carlo"], mplus_errors=chk["mplus_errors"])
+        if not chk["ok"]:
             summary["ok"] = False
     elif summary.get("ok"):
         summary.update(ok=False, mplus_out=None, reason="no .out file came back")

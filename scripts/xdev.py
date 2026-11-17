@@ -52,11 +52,23 @@ def main(argv=None) -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--arg", action="append", default=[])
     p.add_argument("--max", type=int, default=3600)
-    p = sub.add_parser("mplus", help="push an .inp (+data), run Mplus on Windows, pull the work dir back, check the .out")
-    p.add_argument("inp")
-    p.add_argument("--input", action="append", default=[])
-    p.add_argument("--out", required=True)
-    p.add_argument("--max", type=int, default=3600)
+    p = sub.add_parser("mplus", help="push one or more .inp (+data), run them on Windows at the same time, pull results, check each .out")
+    p.add_argument("inp", nargs="*")
+    p.add_argument("--input", action="append", default=[], help="data file shared by every model (uploaded once)")
+    p.add_argument("--out", help="local result dir; with 2+ models (or --batch) each model lands in OUT/<inp stem>/")
+    p.add_argument("--max", type=int, default=3600, help="seconds to follow here; a running batch continues on Windows")
+    p.add_argument("--batch", action="store_true", help="use the batch layout and pool even for a single .inp")
+    p.add_argument("--jobs", type=int, help="models running at once in this batch (default: number of models)")
+    p.add_argument("--cpu-budget", type=int, help="sum of PROCESSORS over running models, first model included (default: Windows logical CPUs - 2)")
+    p.add_argument("--mem-reserve-gib", type=float, default=1.5, help="keep this much Windows physical memory free")
+    p.add_argument("--commit-reserve-gib", type=float, default=2.0, help="keep this much Windows commit (page file) headroom")
+    p.add_argument("--model-mem-gib", type=float, default=0.5, help="peak memory reserved per model until it actually uses it")
+    p.add_argument("--disk-reserve-gib", type=float, default=2.0, help="start no model while the work volume has less free space")
+    p.add_argument("--model-timeout", type=int, help="kill a model (only the pool's own child) after this many seconds; default none")
+    p.add_argument("--admission-wait", type=int, default=1800, help="seconds to wait with nothing running before unadmitted models are given up")
+    p.add_argument("--priority", default="Normal", choices=["Normal", "AboveNormal", "BelowNormal", "inherit"],
+                   help="Mplus process priority inside this batch only (EcoQoS off unless inherit)")
+    p.add_argument("--resume", metavar="OUT", help="keep following a batch started earlier into OUT; never resubmits")
     import xdev_clauder
     xdev_clauder.add_parser(sub)
     import xdev_tasks
@@ -105,7 +117,19 @@ def main(argv=None) -> int:
         return xdev_tools.find_tools(a.write)
     if a.cmd == "rscript":
         return xdev_tools.rscript(a.script, a.input, a.out, a.arg, a.max)
-    return xdev_tools.mplus(a.inp, a.input, a.out, a.max)
+    if a.resume:
+        import xdev_mplus_batch
+        return xdev_mplus_batch.resume(a.resume, a.max)
+    if not a.inp or not a.out:
+        ap.error("mplus needs at least one .inp and --out (or --resume OUT)")
+    if len(a.inp) > 1 or a.batch:
+        import xdev_mplus_batch
+        return xdev_mplus_batch.run(a.inp, a.input, a.out, a.max, jobs=a.jobs, cpu_budget=a.cpu_budget,
+                                    mem_reserve_gib=a.mem_reserve_gib, model_mem_gib=a.model_mem_gib,
+                                    commit_reserve_gib=a.commit_reserve_gib, disk_reserve_gib=a.disk_reserve_gib,
+                                    model_timeout_s=a.model_timeout, admission_wait_s=a.admission_wait,
+                                    priority=a.priority)
+    return xdev_tools.mplus(a.inp[0], a.input, a.out, a.max)
 
 
 if __name__ == "__main__":
