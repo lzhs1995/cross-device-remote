@@ -17,7 +17,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='xdev-check-') as tmp:
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
         commands = [[sys.executable, '-B', str(ROOT / 'scripts' / name)] for name in
-                    ['test_advertise.py', 'test_clauder.py', 'test_health.py', 'test_init.py', 'test_install.py', 'test_mplus_batch.py', 'test_public.py',
+                    ['test_advertise.py', 'test_clauder.py', 'test_health.py', 'test_init.py', 'test_install.py', 'test_mplus_batch.py', 'test_mplus_native.py', 'test_public.py',
                      'test_transfer_concurrency.py', 'test_zip_binding.py', 'test_push_shared_delete.py', 'test_push_recovery.py', 'test_push_cleanup_interleaving.py',
                      'test_push_bytes_contract.py', 'test_push_cleanup_trace.py', 'test_push_metadata_contract.py',
                      'test_push_receipt_callback.py',

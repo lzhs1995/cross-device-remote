@@ -457,9 +457,10 @@ def _ts(iso: str) -> float:
     return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", iso).replace("Z", "+00:00")).timestamp()
 
 
-def _collect_one(man: dict, key: str, out_dir: Path) -> dict:
-    """用 W1 pull_dir 取回一个模型目录。原次只试一次：结果未知（124、异常或认领文件还在）就照原样保留
-    远端 zip 和本机认领，不删、不重取；以后 --resume 也不会再取这个模型。"""
+def _collect_one(man: dict, key: str, out_dir: Path, remote: str | None = None) -> dict:
+    """用 W1 pull_dir 取回一个模型目录（默认 models\\<key>；native 路线传 plan 里的 working_directory）。
+    原次只试一次：结果未知（124、异常或认领文件还在）就照原样保留远端 zip 和本机认领，不删、不重取；
+    以后 --resume 也不会再取这个模型。"""
     rec = man["results"].setdefault(key, {})
     if "collect" in rec:
         if rec["collect"]["status"] == "STARTED":  # 上次在取回途中断开：原次结果未知，不重取
@@ -469,7 +470,7 @@ def _collect_one(man: dict, key: str, out_dir: Path) -> dict:
     local = out_dir / key
     rec["collect"] = {"status": "STARTED", "local": str(local), "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     _save(man, out_dir)
-    remote = man["task"]["remote_dir"] + "\\models\\" + key
+    remote = remote or man["task"]["remote_dir"] + "\\models\\" + key
     why = None
     try:
         rc = pull_dir(remote, str(local))
@@ -681,6 +682,9 @@ def resume(out: str, max_seconds: int) -> int:
         man = json.loads((out_dir / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return fail(f"XDEV_MPLUS_NO_MANIFEST {out_dir / MANIFEST}: {exc}", 3)
+    if man.get("schema") == "xdev-mplus-native-v1":
+        import xdev_mplus_native
+        return xdev_mplus_native.resume(man, out_dir, max_seconds)
     if man.get("schema") != SCHEMA:
         return fail(f"XDEV_MPLUS_REFUSED {out_dir / MANIFEST} is {man.get('schema')}; batches before v2 were not W1 tasks"
                     " and stay as recorded", 3)

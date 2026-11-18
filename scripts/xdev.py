@@ -59,15 +59,18 @@ def main(argv=None) -> int:
     p.add_argument("--max", type=int, default=3600, help="seconds to follow here; a running batch continues on Windows")
     p.add_argument("--batch", action="store_true", help="use the batch layout and pool even for a single .inp")
     p.add_argument("--jobs", type=int, help="models running at once in this batch (default: number of models)")
-    p.add_argument("--cpu-budget", type=int, help="sum of PROCESSORS over running models, first model included (default: Windows logical CPUs - 2)")
-    p.add_argument("--mem-reserve-gib", type=float, default=1.5, help="keep this much Windows physical memory free")
-    p.add_argument("--commit-reserve-gib", type=float, default=2.0, help="keep this much Windows commit (page file) headroom")
-    p.add_argument("--model-mem-gib", type=float, default=0.5, help="peak memory reserved per model until it actually uses it")
-    p.add_argument("--disk-reserve-gib", type=float, default=2.0, help="start no model while the work volume has less free space")
-    p.add_argument("--model-timeout", type=int, help="kill a model (only the pool's own child) after this many seconds; default none")
-    p.add_argument("--admission-wait", type=int, default=1800, help="seconds to wait with nothing running before unadmitted models are given up")
-    p.add_argument("--priority", default="Normal", choices=["Normal", "AboveNormal", "BelowNormal", "inherit"],
-                   help="Mplus process priority inside this batch only (EcoQoS off unless inherit)")
+    # 以下是 BATCH_ONLY 池的参数：默认值在 xdev_mplus_batch.limits()；--native 路线显式给了就拒绝
+    p.add_argument("--cpu-budget", type=int, help="pool: sum of PROCESSORS over running models, first model included (default: Windows logical CPUs - 2)")
+    p.add_argument("--mem-reserve-gib", type=float, help="pool: keep this much Windows physical memory free (default 1.5)")
+    p.add_argument("--commit-reserve-gib", type=float, help="pool: keep this much Windows commit (page file) headroom (default 2.0)")
+    p.add_argument("--model-mem-gib", type=float, help="pool: peak memory reserved per model until it actually uses it (default 0.5)")
+    p.add_argument("--disk-reserve-gib", type=float, help="pool: start no model while the work volume has less free space (default 2.0)")
+    p.add_argument("--model-timeout", type=int, help="pool: kill a model (only the pool's own child) after this many seconds; default none")
+    p.add_argument("--admission-wait", type=int, help="pool: seconds to wait with nothing running before unadmitted models are given up (default 1800)")
+    p.add_argument("--priority", choices=["Normal", "AboveNormal", "BelowNormal", "inherit"],
+                   help="pool: Mplus process priority inside this batch only (default Normal; EcoQoS off unless inherit)")
+    p.add_argument("--native", metavar="BINDING", help="host-level admission via W1 GeneralBatchAdmission + native driver; BINDING is the private deployment JSON")
+    p.add_argument("--deadline", type=float, help="--native: per-model deadline in seconds, 0 < S <= 180 (required; driver limit)")
     p.add_argument("--resume", metavar="OUT", help="keep following a batch started earlier into OUT; never resubmits")
     import xdev_clauder
     xdev_clauder.add_parser(sub)
@@ -122,13 +125,18 @@ def main(argv=None) -> int:
         return xdev_mplus_batch.resume(a.resume, a.max)
     if not a.inp or not a.out:
         ap.error("mplus needs at least one .inp and --out (or --resume OUT)")
+    pool = dict(cpu_budget=a.cpu_budget, mem_reserve_gib=a.mem_reserve_gib, model_mem_gib=a.model_mem_gib,
+                commit_reserve_gib=a.commit_reserve_gib, disk_reserve_gib=a.disk_reserve_gib,
+                model_timeout_s=a.model_timeout, admission_wait_s=a.admission_wait, priority=a.priority)
+    if a.native:
+        import xdev_mplus_native
+        return xdev_mplus_native.run(a.inp, a.input, a.out, a.max, a.native, deadline_s=a.deadline, jobs=a.jobs, **pool)
+    if a.deadline is not None:
+        ap.error("--deadline belongs to --native; the pool uses --model-timeout")
     if len(a.inp) > 1 or a.batch:
         import xdev_mplus_batch
-        return xdev_mplus_batch.run(a.inp, a.input, a.out, a.max, jobs=a.jobs, cpu_budget=a.cpu_budget,
-                                    mem_reserve_gib=a.mem_reserve_gib, model_mem_gib=a.model_mem_gib,
-                                    commit_reserve_gib=a.commit_reserve_gib, disk_reserve_gib=a.disk_reserve_gib,
-                                    model_timeout_s=a.model_timeout, admission_wait_s=a.admission_wait,
-                                    priority=a.priority)
+        return xdev_mplus_batch.run(a.inp, a.input, a.out, a.max, jobs=a.jobs,
+                                    **{k: v for k, v in pool.items() if v is not None})
     return xdev_tools.mplus(a.inp[0], a.input, a.out, a.max)
 
 
