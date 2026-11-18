@@ -28,6 +28,7 @@ class PushRecovery(unittest.TestCase):
             (self.state / name).mkdir(parents=True)
         self.core = types.ModuleType('xdev_core')
         self.core.STATE = self.state
+        self.core.WIN_ROOT = r'C:\xdev'
         self.core.PREAMBLE = '# synthetic preamble\n'
         self.core.emitted = lambda out: [json.loads(x[10:]) for x in out.split('\n') if x.startswith('XDEV_JSON ')]
         self.core.fail = lambda message, rc=1: rc

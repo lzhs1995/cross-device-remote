@@ -16,7 +16,7 @@ import uuid
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from xdev_core import STATE, emitted, fail, ps_quote, run_ps
+from xdev_core import STATE, WIN_ROOT, emitted, fail, ps_quote, run_ps
 
 CHUNK = 3 * 1024 * 1024
 
@@ -626,7 +626,7 @@ def pull_dir(remote_dir: str, local_dir: str) -> int:
     dst = _destination(local_dir)
     if dst.exists() and (not dst.is_dir() or any(dst.iterdir())):
         return fail(f'XDEV_PULL_REFUSED local dir not empty: {dst}', 3)
-    tx = _Transfer('pull-dir', source=remote_dir, destination=str(dst))
+    tx = _Transfer('pull-dir', source=remote_dir, destination=str(dst), windows_root=WIN_ROOT)
     try:
         claim = _claim(dst, tx)
     except FileExistsError:
@@ -642,18 +642,39 @@ if (-not (Test-Path -LiteralPath $D -PathType Container)) {{ Emit @{{ok=$false;r
 $Z = Join-Path $XRoot 'outbox\\pull-{tx.id}.zip'
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Z) | Out-Null
 [IO.Compression.ZipFile]::CreateFromDirectory($D, $Z)
-Emit @{{ok=$true;zip=$Z;files=@(Get-ChildItem -LiteralPath $D -Recurse -File).Count}}
+Emit @{{ok=$true;zip=$Z;files=@(Get-ChildItem -LiteralPath $D -Recurse -File).Count;root=$XRoot;requested_root={ps_quote(WIN_ROOT)};transfer_id='{tx.id}';requested_source={ps_quote(remote_dir)}}}
 """
         rc, out, err, job = tx.call('zip', zscript, timeout=600)
         rows = emitted(out)
-        if rc != 0 or len(rows) != 1 or rows[0].get('ok') is not True:
+        if rc != 0 or len(rows) != 1 or not isinstance(rows[0], dict) or rows[0].get('ok') is not True:
             settled = rc != 124
             tx.finish('FAILED' if settled else 'UNKNOWN', job_id=job, local_zip=str(lzip))
             return fail(f'XDEV_ZIP_FAILED rc={rc} job={job} receipt={tx.root} {(out + err)[-800:]}', rc or 1)
-        rzip, nfiles = rows[0]['zip'], rows[0]['files']
+        row = rows[0]
+        rzip, nfiles = row.get('zip'), row.get('files')
         if not isinstance(rzip, str) or type(nfiles) is not int or nfiles < 0:
             settled = True; tx.finish('INVALID_ZIP_RECEIPT', job_id=job)
             return fail(f'XDEV_ZIP_FAILED invalid receipt job={job}', 5)
+        # Expand is Windows-only. Its root must come from this bound, signed
+        # job; a literal configured root is also checked independently here.
+        rroot = row.get('root')
+        root = PureWindowsPath(rroot) if isinstance(rroot, str) else PureWindowsPath()
+        expected_root = root if '%' in WIN_ROOT else PureWindowsPath(WIN_ROOT)
+        expected_zip = str(expected_root / 'outbox' / f'pull-{tx.id}.zip')
+        if (row.get('transfer_id') != tx.id or row.get('requested_source') != remote_dir
+                or row.get('requested_root') != WIN_ROOT or not root.is_absolute()
+                or '%' in str(root) or '..' in root.parts
+                or str(root).startswith(('\\\\?\\', '\\\\.\\'))
+                or ('%' not in WIN_ROOT and root != PureWindowsPath(WIN_ROOT))
+                or ('%' in WIN_ROOT and root.drive.startswith('\\\\'))
+                or not PureWindowsPath(rzip).is_absolute()
+                or PureWindowsPath(rzip) != PureWindowsPath(expected_zip)):
+            settled = True
+            tx.finish('ZIP_RECEIPT_BINDING_MISMATCH', job_id=job, receipt=row,
+                      expected_zip=expected_zip, requested_root=WIN_ROOT)
+            return fail(f'XDEV_ZIP_FAILED path binding mismatch job={job} receipt={tx.root}', 5)
+        # Subsequent operations use the expected path, never the receipt spelling.
+        rzip = expected_zip
         _write_new(tx.root / 'ARCHIVE.json', dict(remote_zip=rzip, local_zip=str(lzip), files=nfiles, job_id=job))
         rc = pull(rzip, str(lzip), quiet=True)
         if rc:

@@ -34,6 +34,7 @@ class TransferTests(unittest.TestCase):
         state = self.root / 'state'; (state / 'files').mkdir(parents=True)
         core = types.ModuleType('xdev_core')
         core.STATE = state
+        core.WIN_ROOT = r'C:\xdev'
         core.emitted = lambda out: [json.loads(line[10:]) for line in out.split('\n') if line.startswith('XDEV_JSON ')]
         core.fail = lambda message, rc=1: rc
         core.ps_quote = lambda value: "'" + str(value).replace("'", "''") + "'"
@@ -159,7 +160,9 @@ class TransferTests(unittest.TestCase):
 
     def _zip_reply(self, script, job=40, count=1, **kwargs):
         name = re.search(r"outbox\\(pull-[a-f0-9]+\.zip)'", script)[1]
-        return wire(dict(ok=True, zip='C:\\xdev\\outbox\\' + name, files=count), job=job)
+        return wire(dict(ok=True, zip='C:\\xdev\\outbox\\' + name, files=count,
+                         root=self.mod.WIN_ROOT, requested_root=self.mod.WIN_ROOT,
+                         transfer_id=name[5:-4], requested_source='C:\\work'), job=job)
 
     def _archive_pull(self, entries):
         def pull(remote, local, quiet=False):
