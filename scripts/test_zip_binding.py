@@ -131,7 +131,7 @@ class Transport:
             assert kwargs == {'timeout': 60, 'quiet': True}
             members_path = self.state / 'transfers' / self.tx_id / 'MEMBERS.json'
             evidence = json.loads(members_path.read_text(encoding='utf-8'))
-            expected = [{'path': p, 'bytes': len(v), 'sha256': sha(v)} for p, v in sorted(self.expected_members.items())]
+            expected = [{'path': str(Path(p)), 'bytes': len(v), 'sha256': sha(v)} for p, v in sorted(self.expected_members.items())]
             assert evidence == expected, 'Cleanup requires durable complete local member evidence'
             assert all(((self.destination / p).read_bytes() == v for p, v in self.expected_members.items()))
             assert (self.destination.parent / f'.xdev-pull-{self.tx_id}.zip').read_bytes() == GOOD_ZIP
