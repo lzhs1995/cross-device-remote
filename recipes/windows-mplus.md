@@ -52,19 +52,21 @@ xdev mplus m1.inp m2.inp --input shared.dat --native ~/private/xdev-native-bindi
 xdev mplus --resume ./results/native     # 同一入口；按清單 schema 走 native 收尾，不重提、不重調 driver
 ```
 
-`--native` 把起程序核心整個交給 W1 的長壽命 Python owner（`native_batch_driver` + `GeneralBatchAdmission`）。整批仍是一個具名任務（凍結意圖、逐檔上傳、只啟動一次），多傳兩個控制檔 `_xdev_native_plan.json`、`_xdev_native_admission.json`。任務正文不起 Mplus、不讀寫預約：先核 cwd 等於 `work_root\<批次名>`、任務名等於 batch_id、driver／adapter／backend／plan／config 五個 SHA、Python 存在、journal 與 `models\` 都還不存在，任一不符寫 `xdev_native_wrapper.json`（REFUSED）並退出 2；全部通過才用 `Start-Process` 同步呼叫 driver 一次（只有 `--plan`、`--admission-config`、`--adapter-module`、`--backend-module` 四個參數），把 driver 退出碼原樣交給 runner。
+`--native` 把起程序核心整個交給 W1 的長壽命 Python owner（`native_batch_driver` + `GeneralBatchAdmission`）。整批仍是一個具名任務（凍結意圖、逐檔上傳、只啟動一次），多傳兩個控制檔 `_xdev_native_plan.json`、`_xdev_native_admission.json`。任務正文不起 Mplus、不讀寫預約：先核 cwd 等於 `work_root\<批次名>`、任務名等於 batch_id、driver／adapter／backend／plan／config 五個 SHA、`python.exe` 的 SHA，再用同一解釋器（`-B`，`sys.path[0]` 設成 driver 所在目錄，與 driver 啟動時相同）報出版本、架構、實際導入的 psutil 版本與目錄，逐項等於 BINDING；journal 與 `models\` 都還不存在。任一不符寫 `xdev_native_wrapper.json`（REFUSED）並退出 2；全部通過才用 `Start-Process` 同步呼叫 driver 一次（只有 `--plan`、`--admission-config`、`--adapter-module`、`--backend-module` 四個參數），把 driver 退出碼原樣交給 runner。橋接回執記下核過的 `python_verified`。
 
-- 每個模型的 `working_directory`／`temp_directory` 是 `work_root\<批次名>\models\<檔名>\cwd` 與同層 `tmp`（driver 自建，父層不得預先存在）；輸入從任務目錄複製並核 SHA。request 欄位、admission config 欄位與 W1 adapter 的欄位集完全相同。
-- 收件：Mac 等 runner 回執與 W1 `task_status` 核到 DONE，再一次讀出 driver journal（`RESULT.json`、各 attempt 的 `terminal.json`／`result.json`），逐個 `pull-dir` 取回 `working_directory`，並把 journal 取回到 `OUT/_native_journal/`。模型成功要 driver 記 `EXITED`、exit_code 0、無 validation_errors、`processes_ok`，attempt 檔與 RESULT 一致，取回完成，本機算的 `.out` SHA 等於 driver 記錄，`.out` 判定通過。批次成功另要原任務 rc 0、`admission_state` 為 `RELEASED`、沒有未決成員。
-- 退出碼：0 全過；1 有失敗或 driver 沒建 journal（`NOT_STARTED`，原因在橋接回執）；7 有 UNKNOWN（RESULT 缺／半截／外批、未決成員、SHA 或 attempt 檔不符、pull 124），不重取、不重跑；124 是 `--max` 到時。`processes_ok` 與 `scientific_validation: NOT_PERFORMED` 只說明程序與檔案檢查，不是科學驗收。
+- attempt_id 是 `<批次名>.<檔名>`（adapter 以 (controller, attempt_id) 為永久主鍵，同名模型下一批必須換 id；超過 driver 的 101 字元上限就截短檔名並接其 SHA256 前 8 位）。每個模型的 `working_directory`／`temp_directory` 仍是 `work_root\<批次名>\models\<檔名>\cwd` 與同層 `tmp`（路徑短，不超 MAX_PATH；driver 自建，父層不得預先存在）；輸入從任務目錄複製並核 SHA。request 欄位、admission config 欄位與 W1 adapter 的欄位集完全相同。
+- 收件：Mac 等 runner 回執與 W1 `task_status` 核到 DONE，讀一次輪詢原文（RESULT、事件數、各 attempt 的 `terminal.json`／`result.json`），再把 plan 的 `journal_directory` 整個 `pull-dir` 取回到 `OUT/_native_journal/` 一次並逐項核驗：本機凍結 plan/config 未變；`PLAN.json` 等於凍結 plan 且是 `NATIVE_COLLECTION`；只有本批 driver 會寫的檔名；每個記錄的位元組是 driver 的規範 JSON；RESULT 與輪詢原文相同、成員加未決恰好是 plan 的 attempt 各一次；事件序號連續、首條是本批 config 的 `ORIGINAL_BATCH_INTENT`、末條是唯一且等於 RESULT 的 `DRIVER_RESULT_PERSISTED`、沒有外批 attempt；每個成員的 STAGED/SPAWN_INTENT/IDENTITY/SPAWN_RETURNED/TERMINAL/結算事件各一次且順序正確，暫存 SHA、request、程序身份（pid、出生時間、引擎路徑與 SHA、主機、時鐘域）與完整 terminal 記錄一致；橋接回執與原任務 rc 都等於 driver 按 RESULT 應給的退出碼，`python_verified` 等於 BINDING。核過才逐個 `pull-dir` 取回 plan 的 `working_directory`。模型成功要 driver 記 `EXITED`、exit_code 0、無 validation_errors、`processes_ok`，取回完成，本機算的 `.out` SHA 等於 driver 記錄，`.out` 判定通過。批次成功另要原任務 rc 0、`admission_state` 為 `RELEASED`、沒有未決成員。
+- 退出碼：0 全過；1 有失敗或 driver 沒建 journal（`NOT_STARTED`，原因在橋接回執）；7 有 UNKNOWN（RESULT 缺／半截／外批、journal 取回 FAILED／UNKNOWN 或核不過＝`EVIDENCE_UNVERIFIED`（此時一個模型目錄都不取）、未決成員、`.out` SHA 不符、pull 124），不重取、不重跑；124 是 `--max` 到時。`processes_ok` 與 `scientific_validation: NOT_PERFORMED` 只說明程序與檔案檢查，不是科學驗收。
 - 現有限制直接拒絕、不靜默映射：`--deadline` 必填且 0 < S ≤ 180（driver 上限），較長的模型仍走上面的池；池參數（`--cpu-budget`、`--mem-reserve-gib`、`--commit-reserve-gib`、`--model-mem-gib`、`--disk-reserve-gib`、`--model-timeout`、`--admission-wait`、`--priority`）一律拒絕；沒有優先級／EcoQoS 選項；同批一個引擎；`--jobs`（K）≤ 模型數；檔名須為 ASCII `[A-Za-z0-9][A-Za-z0-9_.-]*`。
 
-BINDING 是私有部署 JSON（Windows 路徑、預算、協調窗口），由批准的部署提供，不進倉庫。結構（值僅示意）：
+BINDING 是私有部署 JSON（Windows 路徑、預算、協調窗口、Python/psutil 身份），由批准的部署提供，不進倉庫。結構（值僅示意）：
 
 ```json
 {"schema": "xdev-mplus-native-binding-v1",
  "work_root": "C:\\path\\to\\xdev\\work",
- "python": {"path": "C:\\path\\to\\python.exe"},
+ "python": {"path": "C:\\path\\to\\python.exe", "sha256": "<64 hex，python.exe 本身>",
+            "version": "<如 3.12.7>", "architecture": "<platform.machine()，如 AMD64>",
+            "psutil": {"version": "<psutil.__version__>", "path": "C:\\path\\to\\site-packages\\psutil"}},
  "driver":  {"path": "C:\\path\\to\\native_batch_driver.py",   "sha256": "7412f8de…（必須等於 W1 審過的配對）"},
  "adapter": {"path": "C:\\path\\to\\general_batch_admission.py", "sha256": "27886689…"},
  "backend": {"path": "C:\\path\\to\\win_process.py",            "sha256": "aed6e241…"},
@@ -75,7 +77,7 @@ BINDING 是私有部署 JSON（Windows 路徑、預算、協調窗口），由�
  "model_budget": {"physical_bytes": 1, "commit_bytes": 1, "output_budget_bytes": 1, "temp_budget_bytes": 1}}
 ```
 
-本機只核結構、三個 SHA 配對、本地絕對路徑（無 `%VAR%`、UNC、`..`、流名）、引擎檔名 `Mplus.exe`、C: 保留量 ≥ 20,000,000,000 B 與正整數預算；策略、協調窗口與 provider 由 Windows 上的 adapter 原樣核驗。候選實作、Windows 依賴部署、安裝載入與實機 native 運行是四件分開的證據，本 checkout 不代表任何一件已完成。
+本機只核結構、三個 SHA 配對、Python 欄位格式（小寫 SHA、`x.y.z` 版本、架構名、psutil 版本與目錄）、本地絕對路徑（無 `%VAR%`、UNC、`..`、流名）、引擎檔名 `Mplus.exe`、C: 保留量 ≥ 20,000,000,000 B 與正整數預算；Python 的 SHA、版本、架構與 psutil 由 Windows 正文用同一解釋器實測比對，策略、協調窗口與 provider 由 Windows 上的 adapter 原樣核驗。引擎路徑與 driver 記錄的程序映像路徑按 Windows 規則不分大小寫比較，BINDING 應寫 `QueryFullProcessImageNameW` 報出的同一路徑形式（不要經 junction 或 8.3 短名）。候選實作、Windows 依賴部署、安裝載入與實機 native 運行是四件分開的證據，本 checkout 不代表任何一件已完成。
 
 ## 合成冒煙
 
