@@ -420,7 +420,7 @@ def fake_pull(remote, local):
         local.with_name("." + local.name + ".xdev-claim.json").write_text(json.dumps({"transfer_id": "9" * 32}), encoding="utf-8")
         return 124
     local.mkdir(parents=True)
-    (local / (local.name + ".out")).write_text(pull_mode["text"].get(local.name, NORMAL), encoding="utf-8")
+    (local / (local.name + ".out")).write_bytes(pull_mode["text"].get(local.name, NORMAL).encode("utf-8"))
     return 0
 
 
