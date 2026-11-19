@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """离线检查 xdev mplus --native：不连 Windows、不跑 driver 或 Mplus。绑定（含 Python/psutil 身份）、driver plan/config
 字段、批次限定的 attempt_id、任务正文、状态作业和收尾都用替身；收尾用按 successor03 driver 字节格式模拟的 journal，
-覆盖 terminal 缺失/外批/pid 不符、journal 取回失败或外批、成员重复、多余文件、事件篡改、rc 不符、未决成员、SHA 不符、
-.out 失败、pull 124 不重取、不重提。"""
+覆盖 terminal 缺失/外批/pid 不符、journal 取回失败或外批、成员重复、多余文件、事件篡改、预约收据（预算、owner 值域）/grant
+不符、身份取值不合 adapter 规则、Job 仍有活动进程、null PLAN、rc 不符、未决成员、SHA 不符、.out 失败、pull 124 不重取、不重提。"""
 import copy
 import hashlib
 import json
@@ -176,9 +176,9 @@ assert refused(n.native_plan, [M1, M2], [D], good, 60, jobs=3)            # K <=
 assert refused(n.native_plan, [M1], [D], good, None) and refused(n.native_plan, [M1], [D], good, 181)
 assert refused(n.native_plan, [str(P / "m 3.inp")], [], good, 60)          # driver 的 input_name 规则
 assert refused(n.native_plan, [str(P / "_m4.inp")], [], good, 60)
-# 共用输入名：ASCII、不与模型输出或正文的桥接回执/临时文件/stdout/stderr 同名。
-for bad_name in ("d d.dat", "m1.out", "_xdev_native_plan.json", "xdev_native_wrapper.json",
-                 "xdev_native_wrapper.json.part", "driver.stdout", "driver.stderr"):
+# 共用输入名：ASCII、不与 .inp/.out/控制文件同名，也不与正文写的桥接回执/.part、driver 重定向、models、journal 同名（不分大小写）
+for bad_name in ("d d.dat", "m1.out", "_xdev_native_plan.json", "xdev_native_wrapper.json", "XDEV_NATIVE_WRAPPER.JSON.part",
+                 "driver.stdout", "Driver.Stderr", "models", "driver-evidence"):
     (P / "x").mkdir(exist_ok=True)
     (P / "x" / bad_name).write_text("1\n", encoding="ascii")
     assert refused(n.native_plan, [M1], [str(P / "x" / bad_name)], good, 60), bad_name
@@ -211,9 +211,15 @@ assert cfg_json["probe"] == n.PYTHON_PROBE and cfg_json["driver_path"] == "C:\\X
 for marker in ("WORK_DIR_MISMATCH", "TASK_NAME_IS_NOT_BATCH_ID", "SHA_MISMATCH", "PYTHON_MISSING", "JOURNAL_EXISTS_NO_REPLAY",
                "MODELS_DIR_EXISTS_NO_REPLAY", "[NullString]::Value", "$p.WaitForExit()", "exit ([int]$code)", "DRIVER_EXIT_UNKNOWN",
                "PYTHON_SHA_MISMATCH", "PYTHON_PROBE_FAILED", "PYTHON_PROBE_UNREADABLE", "PYTHON_OR_PSUTIL_MISMATCH",
-               "& $cfg.python -B -c $cfg.probe $cfg.driver_path"):
+               "& $cfg.python -B -c $cfg.probe $cfg.driver_path", "if ($null -eq $pv) { Refuse 'PYTHON_PROBE_UNREADABLE' }",
+               "throw 'WRAPPER_RECEIPT_EXISTS_NO_CLOBBER'", "[IO.FileMode]::CreateNew", "$stream.Flush($true)"):
     assert marker in body, marker
 assert body.index("PYTHON_SHA_MISMATCH") < body.index("$cfg.probe") < body.index("PYTHON_OR_PSUTIL_MISMATCH") < body.index("Start-Process")
+# 桥接回执：任何 Refuse 写回执之前先拒绝已存在的回执/.part（不覆盖上传的同名输入）；首次 DRIVER_STARTING 独占新建并落盘，
+# 失败由外层 Stop 结束、不起 driver；之后的回执更新仍按原重试，不因写失败放弃等待原 driver
+assert body.index("WRAPPER_RECEIPT_EXISTS_NO_CLOBBER") < body.index("function Refuse")
+assert body.count(" -Initial") == 1 and body.index("WriteJson $Note $w -Initial") < body.index("Start-Process -FilePath")
+assert body.index("Start-Process -FilePath") < body.index("$p.WaitForExit()") < body.index("exit ([int]$code)")
 # 探针与 driver 同样以 driver 所在目录为 sys.path[0]：放在 driver 旁边的 psutil 会被它报出来（这里用替身包）
 probe_dir = tmp / "probe"
 (probe_dir / "psutil").mkdir(parents=True)
@@ -251,10 +257,10 @@ def canon(value) -> bytes:
     return (n.canonical(value) + "\n").encode()
 
 
-def make_man(label, k=2):
+def make_man(label, k=2, jobs=None):
     """与 run() 相同：真 native_plan，冻结 plan/config 落在 OUT/_xdev_native，清单带两份 SHA 与绑定的 Python 身份。"""
     out_dir = tmp / label
-    pl, nplan, nconfig = n.native_plan([str(INPS / f"m{i}.inp") for i in range(1, k + 1)], [], good, 60)
+    pl, nplan, nconfig = n.native_plan([str(INPS / f"m{i}.inp") for i in range(1, k + 1)], [], good, 60, jobs=jobs)
     ctl = out_dir / n.CONTROL_DIR
     ctl.mkdir(parents=True)
     (ctl / n.PLAN_FILE).write_bytes(canon(nplan))
@@ -438,10 +444,10 @@ def fake_status(name, nbytes=4000, wait_seconds=45):
 xdev_tasks.task_status = fake_status
 
 
-def case(label, k=2, mutate=None, collected=None, polled=None, local=None, journal_rc=None, drive_kw=None, **kw):
+def case(label, k=2, mutate=None, collected=None, polled=None, local=None, journal_rc=None, drive_kw=None, jobs=None, **kw):
     """一批：真 plan → 模拟 driver journal。mutate 两边都改（driver 本身就这么写）；collected/polled 只改取回或轮询的一边；
     local 改本机冻结文件；journal_rc 让 journal 的 pull_dir 原次返回该码。"""
-    man, out_dir, nplan, nconfig = make_man(label, k)
+    man, out_dir, nplan, nconfig = make_man(label, k, jobs)
     J = drive(nplan, nconfig, **(drive_kw or {}))
     if mutate:
         mutate(J)
@@ -499,6 +505,11 @@ rc, man, got = case("c_receipt_no_admission_key", mutate=lambda J:
 assert rc == 0 and man["ok"] is True and len(got) == 3
 assert man["journal_verification"] == {"ok": True, "errors": []}
 assert "key" not in ev(JOURNALS[man["batch"]], "MEASURED_BATCH_RESERVED")["admission"]["admission"]
+# 三个模型、K=2：收据预算的内存/CPU 只计最大的 2 个模型，卷空间计全部模型；按此核验通过并取回全部模型。
+rc, man, got = case("c_k_below_models", k=3, jobs=2)
+assert rc == 0 and man["ok"] is True and len(got) == 4 and man["journal_verification"] == {"ok": True, "errors": []}
+assert ev(JOURNALS[man["batch"]], "MEASURED_BATCH_RESERVED")["admission"]["budget"]["physical_bytes"] < sum(
+    m["request"]["physical_bytes"] for m in JOURNALS[man["batch"]]["files"]["PLAN.json"]["plan"]["models"])
 # 三个模型、psutil 目录大小写不同、安全结算重试留下第二条同样的 NATIVE_TERMINAL：仍是同一原次，通过
 rc, man, got = case("c_three", k=3, wrap_kw={"python_verified": verified_python(psutil_path=PIN["psutil_path"].upper())},
                     mutate=lambda J: (J["events"].insert(J["events"].index(ev(J, "NATIVE_TERMINAL")) + 1,
@@ -640,6 +651,73 @@ unverified("c_engine_other", "not the plan's request/engine", mutate=lambda J: [
 unverified("c_descendants_open", TERM, mutate=lambda J: term(J).update(descendants_complete=False))
 unverified("c_exit_before_birth", TERM, mutate=lambda J: term(J).update(native_exit_filetime_100ns=1))
 unverified("c_exit_code_text", TERM, mutate=lambda J: term(J).update(exit_code="0"))
+# W1 独审反例：Job 里仍有活动进程（或没有这个计数）不能与 descendants_complete 同时成立
+unverified("c_job_active", TERM, mutate=lambda J: term(J).update(job_active_processes=1))
+unverified("c_job_active_missing", TERM, mutate=lambda J: term(J).pop("job_active_processes"))
+unverified("c_job_active_bool", TERM, mutate=lambda J: term(J).update(job_active_processes=False))
+
+
+def identities(J, key=None, **fields):
+    """改一个 attempt 的全部身份副本（IDENTITY_CAPTURED、SPAWN_RETURNED、terminal 文件与 NATIVE_TERMINAL 共用的记录），
+    三者仍彼此一致，只有取值不符合 adapter 规则。"""
+    key = key or first(J)
+    for e in J["events"]:
+        if isinstance(e.get("identity"), dict) and e["identity"].get("attempt_id") == key:
+            e["identity"].update(fields)
+    J["files"][key + ".terminal.json"].update(fields)
+
+
+def second(J):
+    return J["files"]["PLAN.json"]["plan"]["models"][1]["request"]["attempt_id"]
+
+
+def reuse_identity(J):
+    """第二个成员沿用第一个成员的 (pid, 出生)：adapter 拒绝；结果记录随 terminal 一起改，只留这一处不符。"""
+    t1 = term(J)
+    identities(J, second(J), **{k: t1[k] for k in ("pid", "birth_filetime", "birth_filetime_100ns", "birth_utc")})
+    J["files"][second(J) + ".result.json"]["pid"] = t1["pid"]
+
+
+RESV, RECEIPT, GRANT, BIND, CLOCK = ("MEASURED_BATCH_RESERVED must appear exactly once right after ORIGINAL_BATCH_INTENT",
+                                     "MEASURED_BATCH_RESERVED is not this batch's frozen adapter receipt",
+                                     "SPAWN_INTENT grant is not the grant reserved in MEASURED_BATCH_RESERVED",
+                                     "identity birth_utc/host_id/clock_domain are not the values the adapter binds",
+                                     "members do not share one clock_domain or reuse a (pid, birth) identity")
+# W1 独审反例：身份三处自洽但 birth_utc/host_id/clock_domain 为空；以及出生时间差 >= 1 ms、格式不是精确 UTC、主机不是策略的、
+# 两个成员时钟域不同或 (pid, 出生) 重用
+unverified("c_identity_null", BIND, mutate=lambda J: identities(J, birth_utc=None, host_id=None, clock_domain=None))
+unverified("c_birth_skew", BIND, mutate=lambda J: identities(J, birth_utc=filetime_utc(term(J)["birth_filetime"] + 10000)))
+unverified("c_birth_naive", BIND, mutate=lambda J: identities(J, birth_utc=term(J)["birth_utc"].replace("+00:00", "")))
+unverified("c_birth_local", BIND, mutate=lambda J: identities(J, birth_utc=term(J)["birth_utc"].replace("+00:00", "+08:00")))
+unverified("c_host_other", BIND, mutate=lambda J: identities(J, host_id="host-2"))
+unverified("c_clock_blank", BIND, mutate=lambda J: identities(J, clock_domain=""))
+unverified("c_clock_split", CLOCK, mutate=lambda J: identities(J, second(J), clock_domain="windows-monotonic-ns:host-1:driver:2:2"))
+unverified("c_identity_reused", CLOCK, mutate=reuse_identity)
+# W1 独审反例：预约事件缺失、外批/UNKNOWN 收据；以及重复、移到暂存之后、别的 lease、不是新预约、grant 被授权或不是本批的、
+# SPAWN_INTENT 带的 grant 与收据不同
+unverified("c_reserved_missing", RESV, mutate=lambda J: (J["events"].remove(ev(J, "MEASURED_BATCH_RESERVED")), renumber(J)))
+unverified("c_reserved_foreign", RECEIPT,
+           mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED").update(admission={"batch_id": "FOREIGN", "state": "UNKNOWN"}))
+unverified("c_reserved_unknown", RECEIPT, mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED")["admission"].update(state="UNKNOWN"))
+unverified("c_reserved_twice", RESV, mutate=lambda J: insert_before_result(J, copy.deepcopy(ev(J, "MEASURED_BATCH_RESERVED"))))
+unverified("c_reserved_late", RESV, mutate=lambda J: (J["events"].insert(3, J["events"].pop(1)), renumber(J)))
+unverified("c_reserved_lease", RECEIPT, mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED")["admission"].update(
+    lease_key="generalbatch:" + digest(["controller-2", OTHER_PLAN["batch_id"]])))
+unverified("c_reserved_not_new", RECEIPT,
+           mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED")["admission"]["admission"].update(new_reservation=False))
+unverified("c_reserved_events", RECEIPT, mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED")["admission"]["events"].insert(
+    0, {"event": "ADMISSION_NOT_NEW", "monotonic_ns": 0, "utc_epoch": 0.0}))
+unverified("c_reserved_authorized", RECEIPT, mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED")["admission"]["children"][first(J)][
+    "grant"].update(execution_authorized=True))
+unverified("c_reserved_started", RECEIPT, mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED")["admission"]["children"][first(J)].update(
+    state="RUNNING"))
+unverified("c_reserved_other_batch", RECEIPT, mutate=lambda J: ev(J, "MEASURED_BATCH_RESERVED").update(
+    admission=copy.deepcopy(ev(OTHER, "MEASURED_BATCH_RESERVED")["admission"])))
+unverified("c_spawn_grant", GRANT, mutate=lambda J: ev(J, "SPAWN_INTENT")["grant"].update(sha256="0" * 64))
+unverified("c_spawn_grant_other", GRANT, mutate=lambda J: ev(J, "SPAWN_INTENT").update(
+    grant=copy.deepcopy(ev(J, "SPAWN_INTENT", 1)["grant"])))
+# P4 独审反例：PLAN.json 是规范的 JSON null（driver 不会写）也不是本批冻结 plan
+unverified("c_plan_null", "PLAN.json is not this batch's frozen plan", collected=lambda J: J["raw"].update({"PLAN.json": b"null\n"}))
 # 桥接回执与原任务：driver 退出码与 RESULT 不符、原任务 rc 不符、没有或不符的 Python/psutil 身份
 unverified("c_wrapper_exit", "(wrapper 1, task 0, expected 0)", wrap_kw={"driver_exit_code": 1})
 unverified("c_wrapper_state", BRIDGE, wrap_kw={"state": "DRIVER_EXIT_UNKNOWN"})
