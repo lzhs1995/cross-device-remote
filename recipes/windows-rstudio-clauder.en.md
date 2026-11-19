@@ -57,9 +57,22 @@ source(file.path(project_root, "run_member.R"), local = TRUE)
 
 ```sh
 xdev rstudio submit --state ./rstudio-state --request-id member-01 --job-id member-01 --code-file submit.R
-xdev rstudio poll --state ./rstudio-state --job-id member-01
-xdev rstudio result --state ./rstudio-state --request-id member-01
+xdev rstudio poll --state ./rstudio-state --request-id member-01-poll-01 --job-id member-01
 ```
+
+If the Mac's local wait expires before the original queue result arrives, recover that exact poll request:
+
+```sh
+xdev rstudio result --state ./rstudio-state --request-id member-01-poll-01
+```
+
+`result` reads a recorded request receipt; it does not query the async job again. Using the submit request `member-01` retrieves its submission receipt, which may only acknowledge startup. If the poll has a saved `UNKNOWN_HTTP_OUTCOME` receipt, repeated `result` calls return that same saved UNKNOWN. Preserve it without treating it as completion; you may issue a new read-only poll for the same original job under the same binding identity checks:
+
+```sh
+xdev rstudio poll --state ./rstudio-state --request-id member-01-poll-02 --job-id member-01
+```
+
+A poll that reports the job is still running can be followed in the same way. Each new poll uses a new request ID; omitting `--request-id` generates one, which appears in its response receipt. Never resubmit the model or overwrite the original UNKNOWN receipt. A poll that returns an already-saved terminal result creates no new request receipt and needs no `result` recovery.
 
 For a new batch of approved independent models, use one asynchronous R worker per admitted member and submit the available members before observing completion. Each worker loads its own packages. Prepare the exact [fanout contract and external host grant](../docs/concurrency.md#rstudio-fanout), then use the source candidate:
 
@@ -77,7 +90,7 @@ Each member needs unique writable output and scratch directories. The wrapper ch
 
 ## 3. Preserve the request through unknown outcomes
 
-- On 124 or UNKNOWN, use `result` with the original request ID. Do not submit again. Reconcile a late binding with `--request-id bind`.
+- When the original queue result is still pending, use `result` with that original request ID. A saved `UNKNOWN_HTTP_OUTCOME` permits a new read-only poll of the same job with a new request ID as above; retain the unknown original receipt and never submit the model again. Reconcile a late binding with `--request-id bind`.
 - Reuse a saved terminal result. Some older interfaces consume an in-memory terminal job; `not_found` does not prove it never ran.
 - A crash can occur between HTTP execution and durable receipt writing. The interface is not an exactly-once guarantee across every failure.
 - The scientific worker needs its own durable terminal state, original model caps and cumulative budget. Do not turn unknown orphan runtime into zero.

@@ -57,9 +57,22 @@ source(file.path(project_root, "run_member.R"), local = TRUE)
 
 ```sh
 xdev rstudio submit --state ./rstudio-state --request-id member-01 --job-id member-01 --code-file submit.R
-xdev rstudio poll --state ./rstudio-state --job-id member-01
-xdev rstudio result --state ./rstudio-state --request-id member-01
+xdev rstudio poll --state ./rstudio-state --request-id member-01-poll-01 --job-id member-01
 ```
+
+若 Mac 本機等待到時，而原 queue 結果尚未返回，接回同一個輪詢請求：
+
+```sh
+xdev rstudio result --state ./rstudio-state --request-id member-01-poll-01
+```
+
+`result` 只讀已記錄的 request 回執，不會重新查詢非同步 job。使用 submit request `member-01` 會取回提交回執，其中可能只有啟動確認。若 poll 已保存 `UNKNOWN_HTTP_OUTCOME` 回執，反覆 `result` 仍只會回傳同一份 UNKNOWN。保留原回執，不當作完成；可以用新的 request ID 對同一原 job 做唯讀 poll，仍須通過原 binding 身分核驗：
+
+```sh
+xdev rstudio poll --state ./rstudio-state --request-id member-01-poll-02 --job-id member-01
+```
+
+poll 回報仍在執行時，也用此方式接續觀察。每次新 poll 使用新的 request ID；省略 `--request-id` 時工具會生成，並在回應回執中顯示。不能重新提交模型或覆寫原 UNKNOWN 回執。若 poll 直接回傳已存終態，就不會建立新 request 回執，也不需要再用 `result` 接回。
 
 新批次中已批准獨立的模型，每個准入成員使用獨立非同步 R worker，先提交可用成員，再聚合觀察。每個 worker 明確載入自己的套件。準備 [fanout 契約與外部主機 grant](../docs/concurrency.md#rstudio-fanout)，使用原始碼候選：
 
@@ -77,7 +90,7 @@ fanout 為 `BATCH_ONLY`；可用實體 RAM bytes、commit 餘量、全部程序�
 
 ## 3. 保留原請求，處理未知結果
 
-- 124 或 UNKNOWN：沿原 request ID 用 `result`，不能重新 `submit`。遲到的 bind 回執用 `--request-id bind` 接回。
+- 原 queue 結果仍未返回時，沿該原 request ID 用 `result`。已保存 `UNKNOWN_HTTP_OUTCOME` 時，可依上例用新的 request ID 唯讀 poll 同一 job；保留未知原回執，不能重新提交模型。遲到的 bind 回執用 `--request-id bind` 接回。
 - 載入已保存終態，不反覆讀可能會消耗記憶體 job 記錄的舊版介面；`not_found` 不代表從未執行。
 - HTTP 成功到回執落盤之間仍可能崩潰。這個介面不保證每種故障都恰好執行一次。
 - 科學 worker 必須有獨立持久終態、原模型時間上限與累計預算；未知孤兒耗時不能填零。
