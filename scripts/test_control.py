@@ -6,6 +6,8 @@ Job Object acceptance. Run the same suite with native Windows Python for that.
 """
 import base64
 import copy
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 
@@ -91,10 +94,47 @@ class ControlTests(unittest.TestCase):
         return json.loads(base64.b64decode(result["result"]["stdout_b64"]))
 
     def test_different_explicit_resources_really_overlap_and_own_cwd(self):
-        self.client.call("submit", spec("a", 0.7, ["sandbox:a"]))
-        self.client.call("submit", spec("b", 0.7, ["sandbox:b"]))
-        self.start_worker()
-        a, b = self.interval("a"), self.interval("b")
+        release = self.root / "overlap-release"
+        ready = [self.root / ("overlap-ready-" + key) for key in ("a", "b")]
+        # Hold both real child bodies until both have started; fixed sleeps can
+        # finish before a slow second launch. A serial worker cannot reach both markers.
+        for key, marker in zip(("a", "b"), ready):
+            body = ("from pathlib import Path\nimport json,time\n"
+                    "start = time.monotonic_ns()\n"
+                    "release = Path(" + repr(str(release)) + ")\n"
+                    "deadline = time.monotonic() + 60\n"
+                    "Path(" + repr(str(marker)) + ").write_text('ready')\n"
+                    "while not release.exists():\n"
+                    "    if time.monotonic() >= deadline:\n"
+                    "        raise SystemExit('OVERLAP_FIXTURE_RELEASE_TIMEOUT')\n"
+                    "    time.sleep(0.02)\n"
+                    "print(json.dumps({'start':start,'end':time.monotonic_ns()}))\n")
+            self.client.call("submit", spec(key, resources=["sandbox:" + key], code=body, timeout=75))
+        try:
+            self.start_worker()
+            self.until(lambda: all(marker.is_file() for marker in ready))
+            for key in ("a", "b"):
+                self.assertEqual(self.client.call("status", {"key": key})["state"], "CLAIMED")
+        finally:
+            # Preserve a readiness failure, release only our children, and collect
+            # both original keys even if collecting the first one fails.
+            original_error = sys.exc_info()[1]
+            release.touch()
+            results, cleanup_errors = {}, []
+            for key in ("a", "b"):
+                try:
+                    results[key] = self.terminal(key)
+                except Exception as exc:
+                    cleanup_errors.append((key, exc))
+            if cleanup_errors:
+                detail = "overlap fixture cleanup failed: " + repr(cleanup_errors)
+                if original_error is not None:
+                    original_error.add_note(detail)
+                else:
+                    self.fail(detail)
+        for result in results.values():
+            self.assertEqual(result["state"], "SUCCEEDED", result)
+        a, b = (json.loads(base64.b64decode(results[key]["result"]["stdout_b64"])) for key in ("a", "b"))
         self.assertLess(max(a["start"], b["start"]), min(a["end"], b["end"]))
         self.assertTrue((self.root / "worker/work/a/scratch").is_dir())
         self.assertTrue((self.root / "worker/work/b/scratch").is_dir())
@@ -434,16 +474,83 @@ class ControlTests(unittest.TestCase):
         secret_file.write_bytes(printable)
         self.server.secret = printable
         self.client = control.Client(self.url, printable, self.channel)
-        self.start_worker()
         prefix = [sys.executable, "-B", str(Path(control.__file__).resolve())]
         common = ["--url", self.url, "--secret-file", str(secret_file)]
-        run = subprocess.run(prefix + ["run", *common, "--id", "cli", "--wait", "5", "--", sys.executable,
-                                       "-B", "-c", "print('cli-ok')"], capture_output=True, text=True, timeout=10)
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # 尚无worker：确定性覆盖观察截止，不假定子进程能在5秒内完成启动。
+        marker = self.root / "cli-executed-once"
+        code = ("from pathlib import Path; import sys; "
+                "p=Path(" + repr(str(marker)) + "); "
+                "p.open('x').close(); sys.stdout.buffer.write(b'cli-ok\\n')")
+        command = prefix + ["run", *common, "--id", "cli", "--wait", "0.001", "--", sys.executable,
+                            "-B", "-c", code]
+        run = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        messages = [json.loads(line) for line in run.stdout.splitlines()]
+        receipt = messages[0]
+        self.assertFalse(receipt["duplicate"])
+        self.assertEqual(messages[-1], {"key": "cli", "state": "OBSERVER_TIMEOUT", "action": "status original id"})
+        queued = self.client.call("status", {"key": "cli"})
+        self.assertEqual(queued["state"], "QUEUED")
+        self.assertEqual(queued["digest"], receipt["digest"])
+        self.assertFalse(marker.exists())
+        self.start_worker()
+        terminal = self.terminal("cli")
+        self.assertEqual(terminal["state"], "SUCCEEDED", terminal)
+        self.assertEqual(terminal["digest"], receipt["digest"])
+        self.assertEqual(base64.b64decode(terminal["result"]["stdout_b64"]), b"cli-ok\n")
+        executed = marker.stat()
         status = subprocess.run(prefix + ["status", *common, "--id", "cli"], capture_output=True, text=True, timeout=10)
-        self.assertEqual(json.loads(status.stdout)["state"], "SUCCEEDED")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout), terminal)
+        # 原id和载荷只做幂等读取；同一排他marker使第二次真实执行无法成功。
+        command[command.index("--wait") + 1] = "5"
+        resumed = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        messages = [json.loads(line) for line in resumed.stdout.splitlines()]
+        self.assertTrue(messages[0]["duplicate"])
+        self.assertEqual(messages[0]["digest"], receipt["digest"])
+        self.assertEqual(messages[-1], terminal)
+        self.assertEqual(len(self.controller.fetch(0)), 1)
+        self.assertEqual(marker.stat(), executed)
         caps = subprocess.run(prefix + ["capabilities", *common], capture_output=True, text=True, timeout=10)
         self.assertIn("direct-status", json.loads(caps.stdout)["capabilities"])
+
+    def test_cli_wait_observes_running_then_original_terminal(self):
+        # 独立于OS调度的CLI等待协议测试；真实进程/HTTP由上例覆盖。
+        key_file = self.root / "wait-key"
+        key_file.write_text("wait-protocol-synthetic-secret-32-bytes")
+        calls, elapsed = [], [0.0]
+        states = iter(({"key": "wait-original", "state": "QUEUED"},
+                       {"key": "wait-original", "state": "CLAIMED"},
+                       {"key": "wait-original", "state": "SUCCEEDED", "result": {"returncode": 0}}))
+
+        class ScriptedClient:
+            def call(self, operation, payload):
+                calls.append((operation, copy.deepcopy(payload)))
+                if operation == "capabilities":
+                    return {"version": control.VERSION}
+                if operation == "submit":
+                    return {"key": "wait-original", "duplicate": False}
+                if operation == "status":
+                    return next(states)
+                raise AssertionError(operation)
+
+        def advance(seconds):
+            self.assertGreater(seconds, 0)
+            elapsed[0] += seconds
+
+        output = io.StringIO()
+        with patch.object(control, "Client", return_value=ScriptedClient()), \
+                patch.object(control.time, "monotonic", side_effect=lambda: elapsed[0]), \
+                patch.object(control.time, "sleep", side_effect=advance), contextlib.redirect_stdout(output):
+            rc = control.main(["run", "--url", self.url, "--secret-file", str(key_file),
+                               "--id", "wait-original", "--wait", "5", "--", sys.executable, "-c", "pass"])
+        self.assertEqual(rc, 0)
+        self.assertEqual([op for op, _ in calls], ["capabilities", "submit", "status", "status", "status"])
+        self.assertTrue(all(payload == {"key": "wait-original"} for op, payload in calls if op == "status"))
+        self.assertEqual(json.loads(output.getvalue().splitlines()[-1])["state"], "SUCCEEDED")
+        self.assertGreater(elapsed[0], 0)
+        self.assertLess(elapsed[0], 5)
 
     def test_legacy_directory_is_refused_without_mutation(self):
         legacy = self.root / "legacy"

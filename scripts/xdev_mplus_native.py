@@ -22,6 +22,7 @@ import math
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
 import xdev_mplus_batch as batch
@@ -64,6 +65,10 @@ IDENTITY_KEYS = ("pid", "birth_filetime", "birth_filetime_100ns", "birth_utc", "
 MEMBER_SEQUENCE = ("ORIGINAL_FILES_STAGED", "SPAWN_INTENT", "IDENTITY_CAPTURED_SUSPENDED", "IDENTITY_BOUND_BEFORE_RESUME",
                    "SPAWN_RETURNED")
 MEMBER_AFTER = ("ADMISSION_TERMINAL_ACCEPTED", "ORIGINAL_HANDLES_CLOSED")
+# MEASURED_BATCH_RESERVED 里的 adapter receipt()：prepare 成功后的 general-batch-journal-v1 记录原字段
+RECEIPT_KEYS = {"schema", "lease_key", "owner_pid", "owner_created", "configuration_sha256", "original_controller", "batch_id",
+                "state", "budget", "children", "events", "admission"}
+UTC_BIRTH = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,7}))?(?:Z|\+00:00)")  # adapter birth_ticks 的格式
 ADMISSION_KEYS = {"helper_module", "provider_directory", "registry", "original_controller", "policy_id", "policy",
                   "external_evidence", "overhead"}
 BUDGET_KEYS = {"physical_bytes", "commit_bytes", "output_budget_bytes", "temp_budget_bytes"}
@@ -80,6 +85,11 @@ def _sha_bytes(raw: bytes) -> str:
 
 def canonical(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _digest(value) -> str:
+    """adapter 的 digest：规范 JSON 的 SHA256。"""
+    return _sha_bytes(canonical(value).encode())
 
 
 def _winabs(value, label: str) -> str:
@@ -191,7 +201,8 @@ def native_plan(inps: list, inputs: list, bound: dict, deadline_s, jobs=None):
     models, shared = pl["models"], pl["shared"]
     if len(models) + len(shared) + 2 > 128:  # 两个控制文件也算 W1 task 输入
         raise ValueError(f"{len(models)} models + {len(shared)} shared inputs + 2 control files > 128 files per task")
-    taken = {PLAN_FILE.casefold(), CONFIG_FILE.casefold()}
+    taken = {PLAN_FILE.casefold(), CONFIG_FILE.casefold(), JOURNAL.casefold(), "models",
+             "xdev_native_wrapper.json", "xdev_native_wrapper.json.part", "driver.stdout", "driver.stderr"}
     for m in models:
         if not SAFE_INP.fullmatch(m["inp"]) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,100}", m["key"]):
             raise ValueError(f"{m['inp']}: the native driver needs an ASCII name [A-Za-z0-9][A-Za-z0-9_.-]*.inp; rename the file")
@@ -242,8 +253,14 @@ $Root = (Get-Location).ProviderPath
 $meta = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'task.json') -Raw | ConvertFrom-Json
 function Utc { [DateTime]::UtcNow.ToString('o') }
 function Sha([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() }
-function WriteJson([string]$path, $obj) {
+function WriteJson([string]$path, $obj, [switch]$Initial) {
   $tmp = $path + '.part'; $text = $obj | ConvertTo-Json -Compress -Depth 6
+  if ($Initial) {
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($text)
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    return
+  }
   for ($n = 1; $n -le 25; $n++) {
     try {
       [IO.File]::WriteAllText($tmp, $text, (New-Object Text.UTF8Encoding($false)))
@@ -254,6 +271,9 @@ function WriteJson([string]$path, $obj) {
   [Console]::Error.WriteLine('WRITE_FAILED ' + $path)
 }
 $Note = Join-Path $Root 'xdev_native_wrapper.json'
+if ((Test-Path -LiteralPath $Note) -or (Test-Path -LiteralPath ($Note + '.part'))) {
+  throw 'WRAPPER_RECEIPT_EXISTS_NO_CLOBBER'
+}
 $w = [ordered]@{ schema = 'xdev-mplus-native-wrapper-v1'; owner = [string]$meta.owner; name = [string]$meta.name
   remote_dir = [string]$meta.remote_dir; batch_id = $cfg.batch_id; plan_sha256 = $cfg.plan_sha256
   config_sha256 = $cfg.config_sha256; journal = $cfg.journal; state = 'CHECKING'; at = (Utc) }
@@ -270,6 +290,7 @@ if ((Sha $cfg.python) -ne $cfg.python_pin.sha256) { Refuse 'PYTHON_SHA_MISMATCH'
 $probe = @(& $cfg.python -B -c $cfg.probe $cfg.driver_path)
 if ($LASTEXITCODE -ne 0) { Refuse ('PYTHON_PROBE_FAILED rc=' + $LASTEXITCODE) }
 try { $pv = $probe[-1] | ConvertFrom-Json } catch { Refuse 'PYTHON_PROBE_UNREADABLE' }
+if ($null -eq $pv) { Refuse 'PYTHON_PROBE_UNREADABLE' }
 $w.python_verified = [ordered]@{ version = [string]$pv.version; architecture = [string]$pv.architecture
   psutil_version = [string]$pv.psutil_version; psutil_path = [string]$pv.psutil_path }
 if ($pv.version -cne $cfg.python_pin.version -or $pv.architecture -cne $cfg.python_pin.architecture -or
@@ -281,7 +302,7 @@ if (Test-Path -LiteralPath $cfg.journal) { Refuse 'JOURNAL_EXISTS_NO_REPLAY' }
 $Models = Join-Path $Root 'models'
 if (Test-Path -LiteralPath $Models) { Refuse 'MODELS_DIR_EXISTS_NO_REPLAY' }
 $null = New-Item -ItemType Directory -Path $Models
-$w.state = 'DRIVER_STARTING'; $w.at = (Utc); WriteJson $Note $w
+$w.state = 'DRIVER_STARTING'; $w.at = (Utc); WriteJson $Note $w -Initial
 $p = Start-Process -FilePath $cfg.python -ArgumentList $cfg.argline -WorkingDirectory $Root -NoNewWindow -PassThru `
   -RedirectStandardOutput (Join-Path $Root 'driver.stdout') -RedirectStandardError (Join-Path $Root 'driver.stderr')
 $null = $p.Handle
@@ -489,10 +510,98 @@ def _event_attempt(e: dict):
     return ids.pop() if len(ids) == 1 else ("MIXED:" + ",".join(sorted(ids)) if ids else None)
 
 
+def _text(value) -> bool:
+    """adapter text()：非空字符串、无控制字符。"""
+    return isinstance(value, str) and bool(value) and not any(ord(c) < 32 for c in value)
+
+
+def _birth_ticks(utc):
+    """adapter birth_ticks：精确 UTC 出生时间换成 1601 起的 100ns 计数；格式或日期不对返回 None（adapter 那边会拒绝绑定）。"""
+    m = UTC_BIRTH.fullmatch(utc) if isinstance(utc, str) else None
+    if not m:
+        return None
+    try:
+        dt = datetime.fromisoformat(m[1]).replace(tzinfo=timezone.utc) - datetime(1601, 1, 1, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (dt.days * 86400 + dt.seconds) * 10_000_000 + int((m[2] or "0").ljust(7, "0"))
+
+
+def _reservation(events: list, config: dict, requests: dict, errors: list) -> dict:
+    """紧接 ORIGINAL_BATCH_INTENT、在任何暂存与启动之前恰好一条 MEASURED_BATCH_RESERVED，内容是冻结 adapter prepare 成功后
+    的 receipt() 原文：本批 lease_key 与 config SHA、原 controller/batch、RESERVED、plan 每个 attempt 一份未启动的冻结 grant、
+    唯一的 MEASURED_RESERVATION_ACQUIRED，且原次 acquire_measured 报 admitted 与 new_reservation。
+    返回按 attempt 的 grant（供逐成员核 SPAWN_INTENT）；缺失、重复、位置不对或内容不符记错误并返回 {}。"""
+    named = [e for e in events if e["event"] == "MEASURED_BATCH_RESERVED"]
+    if len(named) != 1 or named[0]["sequence"] != 2:
+        errors.append(f"MEASURED_BATCH_RESERVED must appear exactly once right after ORIGINAL_BATCH_INTENT"
+                      f" (found {len(named)} at {[e['sequence'] for e in named][:5]})")
+        return {}
+    lease, cfg_sha = "generalbatch:" + _digest([config["original_controller"], config["batch_id"]]), _digest(config)
+    grants = {}
+    for a, req in requests.items():
+        g = {"schema": "general-batch-grant-v1", "lease_key": lease, "configuration_sha256": cfg_sha, "attempt": req,
+             "execution_authorized": False}
+        grants[a] = dict(g, sha256=_digest(g))
+    rec = named[0].get("admission")
+    children = {a: {"grant": g, "state": "PREPARED", "identity": None, "terminal": None} for a, g in grants.items()}
+    if not (isinstance(rec, dict) and set(rec) == RECEIPT_KEYS and rec["schema"] == "general-batch-journal-v1"
+            and rec["lease_key"] == lease and rec["configuration_sha256"] == cfg_sha and rec["state"] == "RESERVED"
+            and rec["original_controller"] == config["original_controller"] and rec["batch_id"] == config["batch_id"]
+            and canonical(rec["children"]) == canonical(children)  # 按规范字节比，False 与 0 不算相同
+            and isinstance(rec["events"], list) and len(rec["events"]) == 1 and isinstance(rec["events"][0], dict)
+            and rec["events"][0].get("event") == "MEASURED_RESERVATION_ACQUIRED"
+            and isinstance(rec["admission"], dict) and rec["admission"].get("admitted") is True
+            and rec["admission"].get("new_reservation") is True):
+        errors.append("MEASURED_BATCH_RESERVED is not this batch's frozen adapter receipt"
+                      " (lease/config/controller/batch/RESERVED/grants/new reservation)")
+        return {}
+    # owner uses the frozen provider's PID / psutil epoch-seconds domain, not child FILETIME.
+    pid, created = rec["owner_pid"], rec["owner_created"]
+    if (type(pid) is not int or not 1 <= pid <= 2**31 - 1
+            or type(created) not in (int, float) or not .001 <= created <= 2**53
+            or not math.isfinite(created)):
+        errors.append("MEASURED_BATCH_RESERVED owner is outside the frozen provider domain")
+        return {}
+    try:
+        # Frozen prepare(): top K memory/CPU, but all members' output/temp volumes.
+        rows, overhead, count = list(requests.values()), config["overhead"], config["max_parallel"]
+        if type(count) is not int or not 1 <= count <= len(rows):
+            raise ValueError("invalid K")
+        budget = {f: overhead[f] + sum(sorted((r[f] for r in rows), reverse=True)[:count])
+                  for f in ("physical_bytes", "commit_bytes", "processors")}
+        volumes = {}
+        for root, amount in overhead["volume_bytes"].items():
+            if not isinstance(root, str) or not re.fullmatch(r"[A-Za-z]:\\", root) or root.upper() in volumes:
+                raise ValueError("invalid or duplicate drive root")
+            volumes[root.upper()] = amount
+        for row in rows:
+            for pf, bf in (("working_directory", "output_budget_bytes"), ("temp_directory", "temp_budget_bytes")):
+                root = PureWindowsPath(row[pf]).anchor.upper()
+                volumes[root] = volumes.get(root, 0) + row[bf]
+        budget["volume_bytes"] = volumes
+        actual = rec["budget"]
+        if not isinstance(actual, dict) or set(actual) != set(budget):
+            raise ValueError("invalid budget fields")
+        for field in ("physical_bytes", "commit_bytes", "processors"):
+            amount = actual[field]
+            if type(amount) is not int or not 1 <= amount <= (4096 if field == "processors" else 2**53):
+                raise ValueError("invalid budget scalar")
+        if (not isinstance(actual["volume_bytes"], dict)
+                or any(type(v) is not int or not 0 <= v <= 2**53 for v in actual["volume_bytes"].values())
+                or canonical(actual) != canonical(budget)):
+            raise ValueError("budget differs from frozen prepare")
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+        errors.append("MEASURED_BATCH_RESERVED budget differs from frozen config/requests")
+        return {}
+    return grants
+
+
 def verify_journal(man: dict, out_dir: Path, r: dict) -> dict:
     """取回的 driver journal 是否就是本批这一次原 run：冻结 plan/config 未变、PLAN.json 等于冻结 plan、
-    RESULT 与轮询原文相同且成员集与 plan 完全对上、每个成员的 STAGED/SPAWN/IDENTITY/TERMINAL 事件与完整
-    terminal、result 文件同属 plan 里的原 attempt、桥接回执与原任务 rc 与 RESULT 相符。只读本机文件。
+    RESULT 与轮询原文相同且成员集与 plan 完全对上、暂存之前恰好一条本批的 adapter 预约收据、每个成员的
+    STAGED/SPAWN（带收据里的 grant）/IDENTITY/TERMINAL 事件与完整 terminal（出生时间、主机、时钟域按 adapter 规则，
+    Job 活动进程为 0）、result 文件同属 plan 里的原 attempt、桥接回执与原任务 rc 与 RESULT 相符。只读本机文件。
     返回 ok、errors 与核过的 members/terminals；任何一项不符都不算成功，由收尾按证据未知处理。"""
     errors = []
     ctl, jd = out_dir / CONTROL_DIR, out_dir / "_native_journal"
@@ -516,7 +625,7 @@ def verify_journal(man: dict, out_dir: Path, r: dict) -> dict:
     if odd:
         errors.append(f"journal has files this batch's driver does not write: {odd[:5]}")
     pj = _record(jd / "PLAN.json", errors, "PLAN.json")
-    if pj is not None and pj != {"plan": plan, "evidence_class": "NATIVE_COLLECTION"}:
+    if not isinstance(pj, dict) or pj != {"plan": plan, "evidence_class": "NATIVE_COLLECTION"}:
         errors.append("PLAN.json is not this batch's frozen plan")
     res = _record(jd / "RESULT.json", errors, "RESULT.json")
     if res is not None and not isinstance(res, dict):
@@ -553,6 +662,11 @@ def verify_journal(man: dict, out_dir: Path, r: dict) -> dict:
         foreign = sorted({str(a) for a in map(_event_attempt, events) if a is not None and a not in requests})
         if foreign:
             errors.append(f"events name attempts outside this batch: {foreign[:5]}")
+    grants = _reservation(events, config, requests, errors) if events else {}
+    host = (config.get("policy") or {}).get("host_id")  # driver 把它交给 backend，adapter 用它核每个子进程
+    if not _text(host):
+        errors.append("frozen config policy has no host_id; no child identity can match it")
+    clocks, births = set(), []
     by = {a: [e for e in events if _event_attempt(e) == a] for a in attempts}
     snap = r.get("members") or {}
     terminals, results = {}, {}
@@ -586,6 +700,8 @@ def verify_journal(man: dict, out_dir: Path, r: dict) -> dict:
             errors.append(f"{a}: staged input/data SHA differ from the plan")
         if once["SPAWN_INTENT"].get("request") != req:
             errors.append(f"{a}: SPAWN_INTENT request is not the plan's request")
+        if grants and canonical(once["SPAWN_INTENT"].get("grant")) != canonical(grants[a]):
+            errors.append(f"{a}: SPAWN_INTENT grant is not the grant reserved in MEASURED_BATCH_RESERVED")
         if not isinstance(term, dict) or any(e.get("terminal") != term for e in named["NATIVE_TERMINAL"]):
             errors.append(f"{a}: terminal file missing or differs from its NATIVE_TERMINAL events")
             continue
@@ -596,13 +712,24 @@ def verify_journal(man: dict, out_dir: Path, r: dict) -> dict:
                 or PureWindowsPath(str(term.get("exe_path"))) != PureWindowsPath(req["exe_path"])):
             errors.append(f"{a}: terminal identity is not the plan's request/engine")
         pid, birth, end = term.get("pid"), term.get("birth_filetime_100ns"), term.get("native_exit_filetime_100ns")
+        active = term.get("job_active_processes")
         if (type(pid) is not int or pid <= 0 or type(birth) is not int or birth <= 0 or term.get("birth_filetime") != birth
                 or type(end) is not int or end < birth or term.get("terminal") not in ("EXITED", "TERMINATED")
-                or type(term.get("exit_code")) is not int or term.get("descendants_complete") is not True):
-            errors.append(f"{a}: terminal record incomplete (pid/birth/exit/descendants)")
+                or type(term.get("exit_code")) is not int or term.get("descendants_complete") is not True
+                or type(active) is not int or active != 0):  # 子孙已关完 = 原 Job 里活动进程为 0
+            errors.append(f"{a}: terminal record incomplete (pid/birth/exit/descendants/job_active_processes)")
+        # adapter mark_started 的取值规则：birth_utc 与 FILETIME 相差 < 1 ms、host 等于策略、时钟域是非空文本
+        ticks = _birth_ticks(term.get("birth_utc"))
+        if (ticks is None or type(birth) is not int or abs(ticks - birth) >= 10000 or term.get("host_id") != host
+                or not _text(term.get("host_id")) or not _text(term.get("clock_domain"))):
+            errors.append(f"{a}: identity birth_utc/host_id/clock_domain are not the values the adapter binds")
+        clocks.add(repr(term.get("clock_domain")))
+        births.append(repr((pid, birth)))
         if (results.get(a) != mem or mem.get("pid") != pid or mem.get("exit_code") != term.get("exit_code")
                 or mem.get("terminal") != term.get("terminal") or mem.get("descendants_complete") is not True):
             errors.append(f"{a}: member result does not match its terminal/result files")
+    if len(clocks) > 1 or len(set(births)) != len(births):  # 同一 driver 一个时钟域；(pid, 出生) 不重用
+        errors.append("members do not share one clock_domain or reuse a (pid, birth) identity")
     want_rc = None
     if isinstance(res, dict):
         want_rc = 0 if res.get("processes_ok") is True else (7 if res.get("unresolved_attempt_ids") else 1)

@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 HERE = Path(__file__).resolve().parent
 tmp = Path(tempfile.mkdtemp(prefix="xdev-native-test-"))
@@ -55,7 +55,8 @@ BINDING = {"schema": n.BINDING_SCHEMA, "work_root": WORK, "python": PY,
            "engine": {"exe_path": "C:\\XM\\Mplus.exe", "exe_sha256": "e" * 64},
            "admission": {"helper_module": "C:\\XN\\host_admission_adapter.py", "provider_directory": "C:\\XN\\providers",
                          "registry": "C:\\XR\\reservations.sqlite", "original_controller": "controller-1", "policy_id": "policy-1",
-                         "policy": {"schema": "host-measured-policy-v1", "volume_reserve_bytes": {"C:\\": 20_000_000_000}},
+                         "policy": {"schema": "host-measured-policy-v1", "host_id": "host-1",
+                                    "volume_reserve_bytes": {"C:\\": 20_000_000_000}},
                          "external_evidence": {"path": "C:\\XN\\window.json", "sha256": "f" * 64},
                          "overhead": {"physical_bytes": 1, "commit_bytes": 1, "processors": 1, "volume_bytes": {"C:\\": 1}}},
            "model_budget": {"physical_bytes": 2 ** 30, "commit_bytes": 2 ** 30, "output_budget_bytes": 2 ** 20,
@@ -175,7 +176,9 @@ assert refused(n.native_plan, [M1, M2], [D], good, 60, jobs=3)            # K <=
 assert refused(n.native_plan, [M1], [D], good, None) and refused(n.native_plan, [M1], [D], good, 181)
 assert refused(n.native_plan, [str(P / "m 3.inp")], [], good, 60)          # driver 的 input_name 规则
 assert refused(n.native_plan, [str(P / "_m4.inp")], [], good, 60)
-for bad_name in ("d d.dat", "m1.out", "_xdev_native_plan.json"):        # 共用输入名：ASCII、不与 .inp/.out/控制文件同名
+# 共用输入名：ASCII、不与模型输出或正文的桥接回执/临时文件/stdout/stderr 同名。
+for bad_name in ("d d.dat", "m1.out", "_xdev_native_plan.json", "xdev_native_wrapper.json",
+                 "xdev_native_wrapper.json.part", "driver.stdout", "driver.stderr"):
     (P / "x").mkdir(exist_ok=True)
     (P / "x" / bad_name).write_text("1\n", encoding="ascii")
     assert refused(n.native_plan, [M1], [str(P / "x" / bad_name)], good, 60), bad_name
@@ -262,6 +265,43 @@ def make_man(label, k=2):
     return man, out_dir, nplan, nconfig
 
 
+def digest(value):
+    """W1 adapter 的 digest 原式（独立于被测代码）：规范 JSON 的 SHA256。"""
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def filetime_utc(ticks):
+    """W1 backend _filetime_utc 原式：FILETIME（1601 起 100ns）显示到微秒的 UTC isoformat。"""
+    from datetime import datetime, timedelta, timezone
+    return (datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)).isoformat()
+
+
+def receipt(nplan, nconfig):
+    """adapter prepare 成功后 receipt() 的形状：本批 lease、config SHA、RESERVED、每个 attempt 一份未启动的冻结 grant。"""
+    lease, cfg_sha = "generalbatch:" + digest([nconfig["original_controller"], nconfig["batch_id"]]), digest(nconfig)
+    children = {}
+    for x in nplan["models"]:
+        g = {"schema": "general-batch-grant-v1", "lease_key": lease, "configuration_sha256": cfg_sha,
+             "attempt": copy.deepcopy(x["request"]), "execution_authorized": False}
+        children[x["request"]["attempt_id"]] = {"grant": dict(g, sha256=digest(g)), "state": "PREPARED", "identity": None,
+                                                "terminal": None}
+    # Frozen prepare budget; owner_created is psutil Unix epoch seconds.
+    rows, overhead, count = [x["request"] for x in nplan["models"]], nconfig["overhead"], nconfig["max_parallel"]
+    budget = {f: overhead[f] + sum(sorted((r[f] for r in rows), reverse=True)[:count])
+              for f in ("physical_bytes", "commit_bytes", "processors")}
+    volumes = {root.upper(): amount for root, amount in overhead["volume_bytes"].items()}
+    for r in rows:
+        for pf, bf in (("working_directory", "output_budget_bytes"), ("temp_directory", "temp_budget_bytes")):
+            root = PureWindowsPath(r[pf]).anchor.upper()
+            volumes[root] = volumes.get(root, 0) + r[bf]
+    budget["volume_bytes"] = volumes
+    return {"schema": "general-batch-journal-v1", "lease_key": lease, "owner_pid": 4321, "owner_created": 1794960000.25,
+            "configuration_sha256": cfg_sha, "original_controller": nconfig["original_controller"], "batch_id": nconfig["batch_id"],
+            "state": "RESERVED", "budget": budget,
+            "children": children, "events": [{"event": "MEASURED_RESERVATION_ACQUIRED", "monotonic_ns": 1, "utc_epoch": 1.0}],
+            "admission": {"admitted": True, "new_reservation": True, "key": lease}}
+
+
 def want_rc(res):
     """driver main() 的退出码：processes_ok 为 0，有未决成员为 7，否则 1。"""
     if not isinstance(res, dict):
@@ -282,17 +322,18 @@ def drive(nplan, nconfig, settle=None, exit_codes=None, out_sha=None):
         events.append({"sequence": len(events) + 1, "event": event, "monotonic_ns": 1000 * (len(events) + 1), **fields})
 
     add("ORIGINAL_BATCH_INTENT", configuration_sha256=hashlib.sha256(n.canonical(nconfig).encode()).hexdigest())
-    add("MEASURED_BATCH_RESERVED", admission={"batch_id": nplan["batch_id"], "state": "RESERVED"})
+    rec = receipt(nplan, nconfig)
+    add("MEASURED_BATCH_RESERVED", admission=rec)
     for r in rows:
         add("ORIGINAL_FILES_STAGED", attempt_id=r["attempt_id"], input_sha256=r["input_sha256"], data_sha256=dict(r["data_sha256"]))
     for i, r in enumerate(rows):
         birth = 134394000000000000 + 10 ** 7 * i
         ident = {k: r[k] for k in ("model_id", "route", "input_sha256", "request_id", "job_id", "attempt_id")}
-        ident.update(pid=100 + i, birth_utc=f"2026-11-18T00:00:0{i}Z", birth_filetime_100ns=birth, birth_filetime=birth,
+        ident.update(pid=100 + i, birth_utc=filetime_utc(birth), birth_filetime_100ns=birth, birth_filetime=birth,
                      exe_path=r["exe_path"].upper(), exe_sha256=r["exe_sha256"], host_id="host-1",  # 镜像名大小写可与绑定不同
                      clock_domain="windows-monotonic-ns:host-1:driver:1:1", identity_source="NATIVE_PROCESS_HANDLE",
                      engine_interval_confirmed=False, start_monotonic_ns=None)
-        add("SPAWN_INTENT", request=copy.deepcopy(r), grant={"attempt": {"attempt_id": r["attempt_id"]}})
+        add("SPAWN_INTENT", request=copy.deepcopy(r), grant=copy.deepcopy(rec["children"][r["attempt_id"]]["grant"]))
         add("IDENTITY_CAPTURED_SUSPENDED", identity=ident)
         add("IDENTITY_BOUND_BEFORE_RESUME", attempt_id=r["attempt_id"])
         returned = dict(ident, start_monotonic_ns=5, deadline_seconds=60)
@@ -452,6 +493,12 @@ for k in ("m1", "m2"):
     assert rec["ok"] and rec["output_sha_ok"] and rec["attempt_result_consistent"] and rec["check"]["ok"] and not rec["evidence_mismatch"]
     assert rec["scientific_validation"] == "NOT_PERFORMED" and rec["attempt_id"] == f"{man['batch']}.{k}" and rec["state"] == "SETTLED"
 assert statuses == [man["batch"]]
+# provider 的成功 admission 不要求 key；真实 journal 核验仍通过并取回全部模型。
+rc, man, got = case("c_receipt_no_admission_key", mutate=lambda J:
+                    ev(J, "MEASURED_BATCH_RESERVED")["admission"]["admission"].pop("key"))
+assert rc == 0 and man["ok"] is True and len(got) == 3
+assert man["journal_verification"] == {"ok": True, "errors": []}
+assert "key" not in ev(JOURNALS[man["batch"]], "MEASURED_BATCH_RESERVED")["admission"]["admission"]
 # 三个模型、psutil 目录大小写不同、安全结算重试留下第二条同样的 NATIVE_TERMINAL：仍是同一原次，通过
 rc, man, got = case("c_three", k=3, wrap_kw={"python_verified": verified_python(psutil_path=PIN["psutil_path"].upper())},
                     mutate=lambda J: (J["events"].insert(J["events"].index(ev(J, "NATIVE_TERMINAL")) + 1,
@@ -483,6 +530,28 @@ def unverified(label, expect, **kw):
 
 def term(J):
     return J["files"][first(J) + ".terminal.json"]
+
+
+# 完整预约回执的预算必须等于冻结 prepare：数值相等的 float 也不是整数预算。
+for label, change in (
+    ("c_receipt_budget_wrong", lambda d: d.update(physical_bytes=d["physical_bytes"] - 1)),
+    ("c_receipt_budget_float", lambda d: d.update(commit_bytes=float(d["commit_bytes"]))),
+    ("c_receipt_budget_bool", lambda d: d.update(processors=True)),
+):
+    unverified(label, "MEASURED_BATCH_RESERVED budget differs from frozen config/requests",
+               mutate=lambda J, change=change: change(ev(J, "MEASURED_BATCH_RESERVED")["admission"]["budget"]))
+# owner 是 provider 的严格 PID / epoch-seconds 值域；bool 不能冒充整数。
+for label, field, value in (
+    ("c_receipt_pid_low", "owner_pid", 0),
+    ("c_receipt_pid_high", "owner_pid", 2**31),
+    ("c_receipt_pid_bool", "owner_pid", True),
+    ("c_receipt_created_low", "owner_created", .0009),
+    ("c_receipt_created_high", "owner_created", 2**53 + 1),
+    ("c_receipt_created_bool", "owner_created", True),
+):
+    unverified(label, "MEASURED_BATCH_RESERVED owner is outside the frozen provider domain",
+               mutate=lambda J, field=field, value=value:
+               ev(J, "MEASURED_BATCH_RESERVED")["admission"].update({field: value}))
 
 
 OTHER_MAN, _, OTHER_PLAN, OTHER_CONFIG = make_man("c_otherbatch")
