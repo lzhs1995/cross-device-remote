@@ -20,7 +20,7 @@ $State = [IO.Path]::GetFullPath($State)
 $pairing = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $SecretFile)).Trim()
 if ($pairing.Length -lt 32) { throw 'Pairing secret must have at least 32 characters.' }
 if (Test-Path -LiteralPath $State) { throw 'State already exists; preserve its jobs and use the documented maintenance procedure.' }
-# 防止同一帳號建立兩個讀取同一佇列的 worker。
+# Do not create a second worker for an existing legacy queue.
 $legacy = Join-Path $env:LOCALAPPDATA 'StataWorkbenchAgent\agent2.json'
 if (Test-Path -LiteralPath $legacy) { throw 'Legacy worker configuration found; do not install a second queue consumer.' }
 if ($AutoStart) {
@@ -29,7 +29,7 @@ if ($AutoStart) {
   }
 }
 New-Item -ItemType Directory -Path $State | Out-Null
-# 從空 DACL 建立，不能只停用繼承而保留既有的 OWNER RIGHTS/Admin 顯式規則。
+# Build a fresh DACL without inherited or existing explicit rules.
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $principals = @($sid, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))
 $directoryAcl = [Security.AccessControl.DirectorySecurity]::new()
@@ -50,7 +50,7 @@ foreach ($file in @('wbagent-agent2.ps1','watchdog.ps1','start.vbs')) {
 }
 $cfg = @{state=$State;secret_file=$secretTarget;servers=@($origins);rendezvous=@();mutex='Local\XdevAgentV1'}
 [IO.File]::WriteAllText((Join-Path $State 'agent2.json'), ($cfg | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
-# 複製來源可能附帶顯式 ACE；所有新檔也重建為兩個 SID 的受保護 DACL。
+# Rebuild copied-file DACLs with only the two approved SIDs.
 foreach ($file in @('secret','agent2.json','wbagent-agent2.ps1','watchdog.ps1','start.vbs')) {
   $fileAcl = [Security.AccessControl.FileSecurity]::new()
   $fileAcl.SetAccessRuleProtection($true, $false)

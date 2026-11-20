@@ -14,9 +14,20 @@ import time
 from xdev_core import CFG, HERE, STATE
 
 
+class ProcessUnverified(RuntimeError):
+    """检查受限不等于服务已停，尤其不能据此再启动一个服务。"""
+
+
 def _server_pids() -> list:
     port = str(CFG.get("port", 18092))
-    out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True).stdout
+    try:
+        result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
+                                text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProcessUnverified(type(exc).__name__) from exc
+    if result.returncode:
+        raise ProcessUnverified(f"ps exit {result.returncode}")
+    out = result.stdout
     # 只算 python 进程本身（不算启动它的 sh -c 外壳）
     return [ln.split(None, 1)[0] for ln in out.splitlines()
             if "wbagent.py serve" in ln and f"--port {port}" in ln and not ln.split(None, 1)[1].startswith(("sh ", "/bin/sh "))]
@@ -38,7 +49,12 @@ def _serve_window():
 
 
 def health() -> int:
-    pids, win = _server_pids(), _serve_window()
+    process_error = None
+    try:
+        pids = _server_pids()
+    except ProcessUnverified as exc:
+        pids, process_error = [], str(exc)
+    win = _serve_window()
     seen = (STATE / "last_seen").read_text().split() if (STATE / "last_seen").exists() else []
     try:
         age = time.time() - float(seen[0])
@@ -51,18 +67,26 @@ def health() -> int:
     except (ValueError, StopIteration):
         cursor = None
     peer = next((s.split("=", 1)[1] for s in seen if s.startswith("peer=")), "?")
+    raw_inflight = next((s.split("=", 1)[1] for s in seen if s.startswith("inflight=")), "")
+    inflight = {int(x) for x in raw_inflight.split(",") if x.isdecimal()}
     done = {int(p.stem) for p in (STATE / "results").glob("*.json")}
     pending = sorted(int(p.stem) for p in (STATE / "queue").glob("*.json") if int(p.stem) not in done)
     log = (STATE / "server.log").read_text(encoding="utf-8", errors="replace") if (STATE / "server.log").exists() else ""
     dispatched = {int(x) for x in re.findall(r"DISPATCH id=(\d+)", log)}
     # cursor 之前的缺回执保留 UNKNOWN，不能误当成当前还在跑的任务。
-    historical = sorted(i for i in pending if cursor is not None and i <= cursor)
-    unconfirmed = sorted(i for i in pending if i in dispatched and i not in historical)
-    waiting = sorted(i for i in pending if i not in dispatched and i not in historical)
-    print(f"server   : {'running pid ' + ','.join(pids) if pids else 'NOT RUNNING'}"
+    active_reported = sorted(i for i in pending if i in inflight)
+    historical = sorted(i for i in pending if cursor is not None and i <= cursor and i not in inflight)
+    unconfirmed = sorted(i for i in pending if i in dispatched and i not in historical and i not in inflight)
+    waiting = sorted(i for i in pending if i not in dispatched and i not in historical and i not in inflight)
+    print(f"server   : {'process_unverified (' + process_error + ')' if process_error else 'running pid ' + ','.join(pids) if pids else 'NOT RUNNING'}"
           + (f", TTL left {int((win[0] + win[1] - time.time()) / 60)} min" if pids and win else ""))
     print(f"agent    : last poll {int(age)} s ago from {peer}" if age is not None else "agent    : no valid poll timestamp")
     print(f"queue    : dispatched_unconfirmed {unconfirmed or '-'}, waiting {waiting or '-'}, historical_unknown {historical or '-'}")
+    if active_reported:
+        print(f"inflight : reported_unconfirmed {active_reported} (poll report; not process liveness proof)")
+    if process_error:
+        print("XDEV_HEALTH PROCESS_UNVERIFIED (preserve service; do not start a duplicate)")
+        return 3
     if not pids:
         print("XDEV_HEALTH SERVER_DOWN (start it: xdev serve)")
         return 2
@@ -74,7 +98,12 @@ def health() -> int:
 
 
 def serve() -> int:
-    if _server_pids():
+    try:
+        pids = _server_pids()
+    except ProcessUnverified as exc:
+        print(f"XDEV_SERVE_REFUSED process_unverified ({exc}); preserve the existing service")
+        return 3
+    if pids:
         print("XDEV_SERVE already running")
         return health()
     if (STATE / "STOP").exists():

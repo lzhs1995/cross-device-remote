@@ -111,18 +111,31 @@ function Invoke-Job($Job) {
   return @{ id = $id; rc = $rc; out = (ConvertTo-B64 (Limit-Text $out)); err = (ConvertTo-B64 (Limit-Text $err)); ms = $ms }
 }
 
-function Send-Result($R) {
+function Send-Result($R, [int]$TimeoutSeconds = 5) {
   $mac = Get-Mac ('res|{0}|{1}|{2}|{3}' -f $R.id, $R.rc, $R.out, $R.err)
   $json = '{"id":' + $R.id + ',"rc":' + $R.rc + ',"ms":' + $R.ms + ',"out":"' + $R.out + '","err":"' + $R.err + '","mac":"' + $mac + '"}'
   $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-  for ($n = 1; $n -le 3; $n++) {
+  # 单次有界投递，重试由下一轮公平outbox负责，不阻塞取件。
+  for ($n = 1; $n -le 1; $n++) {
     try {
-      Invoke-WebRequest -UseBasicParsing -Method Post -Uri ($script:Server + '/result') -Body $bytes -ContentType 'application/json' -TimeoutSec 20 | Out-Null
+      Invoke-WebRequest -UseBasicParsing -Method Post -Uri ($script:Server + '/result') -Body $bytes -ContentType 'application/json' -TimeoutSec $TimeoutSeconds | Out-Null
       return $true
     } catch {
+      if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 409) {
+        # 确定性投递冲突保留原结果，只隔离本ID，不写.sent或重跑命令。
+        $conflictPath = Join-Path $State ('result-{0}.json.conflict' -f $R.id)
+        if (-not (Test-Path -LiteralPath $conflictPath)) {
+          $hash = [Security.Cryptography.SHA256]::Create()
+          try { $digest = ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() } finally { $hash.Dispose() }
+          $record = @{id=$R.id;status='DELIVERY_CONFLICT';http_status=409;payload_sha256=$digest;original_result=('result-{0}.json' -f $R.id);at_utc=[DateTime]::UtcNow.ToString('o');replayed=$false} | ConvertTo-Json -Compress
+          $tmp = $conflictPath + '.' + [Guid]::NewGuid().ToString('N') + '.part'
+          [IO.File]::WriteAllText($tmp,$record,(New-Object Text.UTF8Encoding($false)))
+          [IO.File]::Move($tmp,$conflictPath)
+        }
+        Write-AgentLog ('DELIVERY_CONFLICT id={0}; preserved and quarantined' -f $R.id)
+        return $false
+      }
       Write-AgentLog ('post id={0} try {1} failed: {2}' -f $R.id, $n, $_.Exception.Message)
-      Select-NextServer
-      if ($n -lt 3) { Start-Sleep -Seconds 2 }
     }
   }
   return $false
@@ -175,11 +188,15 @@ function Select-NextServer {
 $Deadline = if ($Hours -gt 0) { [DateTime]::UtcNow.AddHours($Hours) } else { [DateTime]::MaxValue }
 Write-AgentLog ('WBAGENT_V2 start pid={0} server={1} last={2} until={3}' -f $PID, $script:Server, $Last, $Deadline.ToString('o'))
 $fails = 0
+$OutboxNext = 0
 while ([DateTime]::UtcNow -lt $Deadline -and -not (Test-Path (Join-Path $State 'STOP'))) {
-  foreach ($pendingResult in @(Get-ChildItem -LiteralPath $State -Filter 'result-*.json' -File)) {
-    if (Test-Path ($pendingResult.FullName + '.sent')) { continue }
+  $outbox = @(Get-ChildItem -LiteralPath $State -Filter 'result-*.json' -File | Where-Object { -not (Test-Path ($_.FullName + '.sent')) -and -not (Test-Path ($_.FullName + '.conflict')) } | Sort-Object Name)
+  $deliveryClock = [Diagnostics.Stopwatch]::StartNew()
+  for ($k=0; $k -lt [Math]::Min(4,$outbox.Count) -and $deliveryClock.Elapsed.TotalSeconds -lt 9; $k++) {
+    $index = $OutboxNext % $outbox.Count; $pendingResult = $outbox[$index]; $OutboxNext++
     $prior = [IO.File]::ReadAllText($pendingResult.FullName) | ConvertFrom-Json
-    if (Send-Result $prior) { [IO.File]::WriteAllText($pendingResult.FullName + '.sent', [DateTime]::UtcNow.ToString('o')) }
+    $remaining = [Math]::Max(1,[Math]::Min(5,[int][Math]::Floor(10-$deliveryClock.Elapsed.TotalSeconds)))
+    if (Send-Result $prior $remaining) { [IO.File]::WriteAllText($pendingResult.FullName + '.sent', [DateTime]::UtcNow.ToString('o')) }
   }
   $t = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   $pm = Get-Mac ('poll|{0}|{1}' -f $Last, $t)
@@ -228,7 +245,9 @@ while ([DateTime]::UtcNow -lt $Deadline -and -not (Test-Path (Join-Path $State '
   # 獨占意向及游標均已保存，之後才啟動子程序。
   $res = Invoke-Job $job
   $resultPath = Join-Path $State ('result-{0}.json' -f $res.id)
-  [IO.File]::WriteAllText($resultPath, ($res | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+  $resultPart = $resultPath + '.' + [Guid]::NewGuid().ToString('N') + '.part'
+  [IO.File]::WriteAllText($resultPart, ($res | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::Move($resultPart,$resultPath)
   $ok = Send-Result $res
   if ($ok) { [IO.File]::WriteAllText($resultPath + '.sent', [DateTime]::UtcNow.ToString('o')) }
   Write-AgentLog ('DONE id={0} rc={1} ms={2} posted={3}' -f $res.id, $res.rc, $res.ms, $ok)

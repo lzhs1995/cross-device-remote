@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -42,12 +43,22 @@ class WindowsWorkerTests(unittest.TestCase):
         self.accept_results = threading.Event()
         self.accept_results.set()
         accept_results = self.accept_results
+        self.refused_result_ids = set()
+        self.post_attempts = []
+        self.post_lock = threading.Lock()
+        refused_result_ids = self.refused_result_ids
+        post_attempts, post_lock = self.post_attempts, self.post_lock
 
         class TestHandler(self.wb.Handler):
             def do_POST(handler):
-                if not accept_results.is_set():
-                    handler.rfile.read(int(handler.headers.get("Content-Length", "0")))
+                body = handler.rfile.read(int(handler.headers.get("Content-Length", "0")))
+                payload = json.loads(body)
+                with post_lock:
+                    post_attempts.append((payload.get("id"), time.monotonic()))
+                    refused = payload.get("id") in refused_result_ids
+                if not accept_results.is_set() or refused:
                     return handler._send(503, b'{}')
+                handler.rfile = io.BytesIO(body)
                 return super().do_POST()
 
         self.server = self.wb.ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
@@ -188,12 +199,71 @@ class WindowsWorkerTests(unittest.TestCase):
         self.assertEqual(local.read_bytes(), before)
         self.until(lambda: Path(str(local) + ".sent").exists())
 
+    def test_conflict_quarantine_and_fair_outbox_with_mixed_503_409_200(self):
+        # 私有状态中预置六份已执行但未投递的原回执。四份503不能阻挡
+        # 后续409隔离、200交付及新命令；任何旧命令重放都会留下marker。
+        self.stop_worker()
+        forbidden = self.root / "outbox-must-not-reexecute.txt"
+        jobs = [self.enqueue(f"[IO.File]::AppendAllText({self.quote(forbidden)}, 'replayed')")
+                for _ in range(6)]
+        original_local = {}
+        for job in jobs:
+            result = dict(id=job, rc=0, ms=1,
+                          out=base64.b64encode(f"candidate-{job}".encode()).decode(), err="")
+            result["mac"] = self.wb.sign("res", job, result["rc"], result["out"], result["err"])
+            raw = json.dumps(result).encode()
+            local = self.worker_state / f"result-{job}.json"
+            local.write_bytes(raw)
+            original_local[job] = raw
+            (self.worker_state / "claims" / f"{job}.json").write_text(
+                json.dumps(dict(id=job, claimed_at="synthetic-original")), encoding="utf-8")
+        (self.worker_state / "last_id").write_text(str(max(jobs)), encoding="ascii")
+        conflict, delivered = jobs[-2:]
+        old = dict(id=conflict, rc=0, ms=2, out=base64.b64encode(b"first receipt").decode(), err="")
+        old["mac"] = self.wb.sign("res", conflict, old["rc"], old["out"], old["err"])
+        self.wb.publish_result(old)
+        original_server = (self.server_state / "results" / f"{conflict}.json").read_bytes()
+        with self.post_lock:
+            self.refused_result_ids.update(jobs[:4])
+        self.start_worker()
+        marker = self.root / "new-command-progress.txt"
+        probe = self.enqueue(f"[IO.File]::WriteAllText({self.quote(marker)}, 'once')")
+        self.assertEqual(self.result(probe)["rc"], 0)
+        quarantine = self.worker_state / f"result-{conflict}.json.conflict"
+        sent = self.worker_state / f"result-{delivered}.json.sent"
+        self.until(lambda: quarantine.exists() and sent.exists(), seconds=80)
+        quarantine_before = quarantine.read_bytes()
+        record = json.loads(quarantine_before)
+        self.assertEqual(record["status"], "DELIVERY_CONFLICT")
+        self.assertEqual(record["id"], conflict)
+        self.assertFalse(record["replayed"])
+        self.assertRegex(record["payload_sha256"], r"^[0-9a-f]{64}$")
+        self.assertFalse((self.worker_state / f"result-{conflict}.json.sent").exists())
+        with self.post_lock:
+            prior_conflict_posts = sum(job == conflict for job, _ in self.post_attempts)
+            refused_posts = sum(job in jobs[:4] for job, _ in self.post_attempts)
+        next_probe = self.enqueue("[Console]::WriteLine('next control request')")
+        self.assertEqual(self.result(next_probe)["rc"], 0)
+        with self.post_lock:
+            self.assertEqual(sum(job == conflict for job, _ in self.post_attempts), prior_conflict_posts)
+            self.assertGreaterEqual(sum(job in jobs[:4] for job, _ in self.post_attempts), refused_posts)
+        self.assertEqual(quarantine.read_bytes(), quarantine_before)
+        self.assertEqual((self.server_state / "results" / f"{conflict}.json").read_bytes(), original_server)
+        for job, raw in original_local.items():
+            self.assertEqual((self.worker_state / f"result-{job}.json").read_bytes(), raw)
+        self.assertFalse(forbidden.exists())
+        self.assertEqual(marker.read_text(), "once")
+
     def test_windows_installer_rejects_non_origin_before_creating_state(self):
         destination = self.root / "must-not-be-created"
         result = subprocess.run([str(POWERSHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-File", str(SOURCE / "windows/install.ps1"), "-Server", self.url + "/not-an-origin",
             "-SecretFile", str(self.worker_state / "secret"), "-State", str(destination)], capture_output=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
+        diagnostic = " ".join(result.stderr.decode("utf-8", "replace").split())
+        self.assertIn("Server must be an HTTP(S) origin with no credentials, query or fragment.", diagnostic)
+        self.assertNotIn("ParserError", diagnostic)
+        self.assertNotIn("UnexpectedToken", diagnostic)
         self.assertFalse(destination.exists())
 
     def test_windows_installer_fresh_local_state(self):

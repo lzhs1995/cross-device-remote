@@ -13,10 +13,13 @@ Mac 負責開發與審查，Windows 執行原本安裝在那裡的軟體並保�
 - Python Mac 控制器與使用者層 Windows PowerShell worker。
 - 簽章控制訊息、固定請求 ID、遲到結果接回及檔案 SHA-256 校驗。
 - 綁定工作階段的 ClaudeR 入口，分開執行 execute、submit、poll 與 result。
+- 原始碼候選：具名任務獨立提交、RStudio 非同步 fanout 與聚合觀察，以及獨立 resource-key 控制通道。
 - 共用 `SKILL.md`，以及 Codex、Claude Code、Gemini、Antigravity 安裝連結；其他能執行命令的 agent 也可明確讀取同一 skill 並呼叫 CLI。
 - 完整英文／繁體中文安裝、架構、恢復、驗收指南，可重用操作配方及原創 SVG 配圖。
 
 來源部署已經由 Windows RStudio／ClaudeR 與 MplusAutomation 執行真實科研批次。**首個公開套件仍需新機 Windows 驗收。** 安裝連結不代表每個 agent 都已自動載入；本機測試也不等於遠端科學驗收。詳見 [驗收契約](docs/validation.zh-TW.md)。
+
+本文並行功能是**本 checkout 的候選實作**，不代表已安裝客戶端可用，也不宣稱已通過四個真實 Mplus 程序同時運行或速度對照。命令與准入邊界見 [並行契約](docs/concurrency.md)。
 
 ## 安裝
 
@@ -60,7 +63,9 @@ xdev run -c '[DateTime]::UtcNow.ToString("o")' --timeout 20
 | --- | --- | --- |
 | 短 PowerShell | `xdev run check.ps1` | 占用共用命令佇列，保持短小 |
 | 背景 PowerShell | `xdev detach unique-name job.ps1` | 沿同名工作以 `tail` 或 `wait` 接回 |
+| 候選具名任務 | `xdev task-submit`、`task-status`、`task-collect` | 先提交獨立子程序，再沿原名觀察與取回 |
 | Windows RStudio／ClaudeR | `xdev rstudio bind`、`execute`、`submit`、`poll`、`result` | 綁定真實工作階段，沿原 request／job ID |
+| 候選 RStudio fanout | `xdev rstudio fanout-submit`、`fanout-poll`、`fanout-merge` | 外部主機 grant；只管批次容量及生命週期證據 |
 | 獨立 R 腳本 | `xdev rscript analysis.R --out ./results/run` | 與 RStudio 不同路線，會取回整個工作目錄 |
 | 直接 Mplus 輸入 | `xdev mplus model.inp --input synthetic.dat --out ./results/run` | 與 MplusAutomation 不同路線，需已安裝 Mplus |
 | 檔案 | `xdev push`、`pull`、`pull-dir` | 核位元組；目錄取回不會篩掉私有輸入 |
@@ -85,7 +90,9 @@ Windows 輪詢 Mac 領取簽章命令。RStudio 工作由 Windows 命令呼叫�
 
 ## 可靠性與效率
 
-先準備腳本，再申請共用 Windows 窗口。一次提交有用的已批准批次，由 Windows 排程成員，Mac 僅保留一個沿原 job 的低頻觀察器。獲窗後立即啟動已備批次，不在窗口內臨時展開新工程。
+先準備腳本，再申請共用 Windows 窗口。先提交已准入的獨立非同步成員，再聚合觀察原 job，不逐一等待模型完成才提交下一個。控制佇列保序或單一可變 Stata 工作階段租約，不能擴大為整機一次一模型。Stata 支援多個 frame，但同一工作階段仍共用命令執行、巨集、日誌及 cwd。
+
+主機准入分別核可用實體 RAM bytes、commit 餘量、全體已運行／已預約程序與執行緒預算，以及各卷輸出／暫存成長。跨佇列共用主機擁有者的 `HostReservations`。fanout 回執明示 `BATCH_ONLY`，候選未實作主機原子准入。原 cap、`apim_v2` cap-1／cap-2 及僅前景契約沿原批次保留。
 
 網路可達、命令受理、RStudio 身分、引擎執行與科學成功分別判斷。保留 UNKNOWN 與已用預算；超時應接回原請求，不能重放。不要宣稱所有崩潰或斷電後都恰好執行一次。
 
@@ -105,6 +112,8 @@ HMAC 驗證訊息但不加密。請使用私有 Tailscale 路徑，服務綁定�
 | 研究批次接續 | [Recipe](recipes/research-batches.en.md) | [配方](recipes/pp-lgcm-mplus-continuation.md) |
 
 其他繁體配方：[Rscript](recipes/windows-r.md)、[直接 Mplus](recipes/windows-mplus.md)、[MplusAutomation](recipes/windows-mplusautomation.md)、[PowerShell／WSL／共用佇列](recipes/windows-wsl-ops-lessons.md)、[遷移／磁碟／驗收](recipes/mac-restore-and-remote-acceptance-lessons.md)。
+
+候選細節：[並行契約](docs/concurrency.md)，含獨立 control server／state；[已授權單一窗口友好關閉](recipes/windows-owned-window-close.md)。
 
 ## 開發與授權
 

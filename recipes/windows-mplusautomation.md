@@ -20,7 +20,7 @@ stopifnot(nzchar(mplus_command), file.exists(mplus_command))
 
 ## 選擇正確入口
 
-- 指定 RStudio／ClaudeR：按 [RStudio 配方](windows-rstudio-clauder.md) 綁定身分、提交一次非同步批次。
+- 指定 RStudio／ClaudeR：按 [RStudio 配方](windows-rstudio-clauder.md) 綁定身分，先提交已准入的獨立非同步 R 成員，再聚合觀察原 job。
 - 明確允許獨立 Rscript：以 `xdev rscript driver.R --out ./results/run` 執行。它會取回整個工作目錄，先確認沒有受限輸入副本。
 - Windows 本機 agent：經本機 ClaudeR 執行相同 driver，不必使用 xdev。
 
@@ -32,4 +32,8 @@ stopifnot(nzchar(mplus_command), file.exists(mplus_command))
 
 限制外流資料留在 Windows。另建 export，只納入允許的摘要、日誌、表格或圖形，取回前後核精確檔案集合及 SHA。`pull-dir` 本身不會篩掉 `data.dat`。
 
-長批次一次載入套件，由 Windows 串行處理已准入成員。共用 Mplus 時按已有窗口協調，不以短命令佇列為空判定引擎空閒。`xdev` 不定義 MI、APIM、LGCM 或其他模型的數值規格。
+獨立模型可由多個非同步 R worker 並行執行；每個 worker 明確載入 MplusAutomation，使用獨占 cwd、可寫輸出及暫存目錄，共享輸入保持唯讀。先提交准入成員，再聚合觀察，不逐一等待全程完成才提交下一個。callr 建立 R 程序後才改 `TMP`／`TEMP` 不會搬移既有 `tempdir()`。
+
+候選 [fanout 命令](../docs/concurrency.md#rstudio-fanout) 只管理 `BATCH_ONLY` 與原 job 證據；外部 grant 回執不等於主機原子准入。跨佇列共用既有 `HostReservations`，分別計算實體 RAM bytes、commit 餘量、所有程序／執行緒與各卷成長預算。保留原 cap、`apim_v2` cap-1／cap-2、僅前景契約與 UNKNOWN，不把 Stata 單工作階段租約當成 Mplus 全機鎖。
+
+候選實作、安裝、同時存在的真實 Mplus PID 與速度／數值對照分開驗證；本配方不宣稱四路實測已通過。`xdev` 不定義 MI、APIM、LGCM 或其他模型的數值規格。

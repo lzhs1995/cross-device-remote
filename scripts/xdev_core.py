@@ -60,15 +60,14 @@ def run_ps(script: str, timeout: int = 300, wait: int | None = None, quiet: bool
     end = time.monotonic() + (wait if wait is not None else timeout + 600)
     r = None
     while True:
-        try:
-            # 现役server可能刚创建文件而尚未写完；只重读原回执，不重提任务。
-            r = json.loads(res.read_text(encoding="utf-8"))
+        # 只接受原ID的完整签名回执；缺密钥/存储失败不能误报WAITING。
+        r = wbagent.read_result(i)
+        if r is not None:
             break
-        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(0.5, remaining))
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
     if r is None:
         if not quiet:
             print(f"XDEV_WAITING id={i} (later: xdev result {i})", file=sys.stderr)

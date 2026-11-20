@@ -4,6 +4,8 @@ import ast
 import base64
 import contextlib
 import hashlib
+import hmac
+import importlib.util
 import io
 import json
 from pathlib import Path
@@ -29,11 +31,19 @@ class ReaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "results").mkdir()
+            (root / "queue").mkdir()
+            (root / "secret").write_text('synthetic-reader-test-key', encoding='utf-8')
+            spec = importlib.util.spec_from_file_location('synthetic_reader_wbagent', SOURCE.parent / 'wbagent.py')
+            reader = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reader)
+            reader.ROOT = root
             path = root / "results/42.json"
             state = {"clock": 0.0, "enqueues": 0, "sleeps": 0}
 
-            def enqueue(*_):
+            def enqueue(script, timeout):
                 state["enqueues"] += 1
+                (root / 'queue/42.json').write_text(json.dumps({'id':42, 'timeout':timeout, 'script':script,
+                    'mac':reader.sign('cmd',42,timeout,script)}))
                 if initial is not None:
                     path.write_bytes(initial)
                 return 42
@@ -50,7 +60,7 @@ class ReaderTests(unittest.TestCase):
                            "json": json, "sys": sys,
                            "time": types.SimpleNamespace(time=lambda: state["clock"],
                                                          monotonic=lambda: state["clock"], sleep=sleep),
-                           "wbagent": types.SimpleNamespace(enqueue=enqueue)}
+                           "wbagent": types.SimpleNamespace(enqueue=enqueue, read_result=reader.read_result)}
             tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
             function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_ps")
             exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), environment)
@@ -61,8 +71,23 @@ class ReaderTests(unittest.TestCase):
 
     @staticmethod
     def valid():
-        return json.dumps({"id": 42, "rc": 7, "out": base64.b64encode("中文\r\n".encode()).decode(),
-                           "err": base64.b64encode(b"diagnostic\r\n").decode()}).encode()
+        row = {"id": 42, "rc": 7, "out": base64.b64encode("中文\r\n".encode()).decode(),
+               "err": base64.b64encode(b"diagnostic\r\n").decode()}
+        value='|'.join(map(str,('res',42,7,row['out'],row['err'])))
+        row['mac']=hmac.new(b'synthetic-reader-test-key',value.encode(),hashlib.sha256).hexdigest()
+        return json.dumps(row).encode()
+
+    def test_bad_signature_waits_for_original_valid_result(self):
+        row=json.loads(self.valid()); row['out']=base64.b64encode(b'forged').decode()
+        result, state, _, _ = self.invoke(json.dumps(row).encode(), [self.valid()])
+        self.assertEqual(result[1], '中文\n')
+        self.assertEqual(state['enqueues'], 1)
+
+    def test_wrong_original_id_never_accepted(self):
+        row=json.loads(self.valid()); row['id']=43
+        result, state, _, final = self.invoke(json.dumps(row).encode(), [], wait=0)
+        self.assertEqual(result, (124, '', '', 42))
+        self.assertEqual(state['enqueues'], 1)
 
     def test_completed_receipt_and_negative_exit_passthrough(self):
         result, state, _, _ = self.invoke(self.valid(), [], wait=0)

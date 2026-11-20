@@ -107,6 +107,32 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("SERVER_DOWN", out)
 
+    def test_process_inspection_failure_never_means_server_down_or_starts_duplicate(self):
+        self.state()
+        for failure in (PermissionError("denied"), OSError("unavailable")):
+            with self.subTest(failure=failure), patch.object(self.client.subprocess, "run", side_effect=failure), \
+                    patch.object(self.client.subprocess, "Popen") as launch, \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(self.client.health(), 3)
+                self.assertEqual(self.client.serve(), 3)
+                self.assertIn("process_unverified", out.getvalue())
+                self.assertNotIn("SERVER_DOWN", out.getvalue())
+                launch.assert_not_called()
+
+    def test_nonzero_ps_exit_is_unverified(self):
+        with patch.object(self.client.subprocess, "run", return_value=types.SimpleNamespace(returncode=1, stdout="")):
+            with self.assertRaises(self.client.ProcessUnverified):
+                self.client._server_pids()
+
+    def test_explicit_inflight_before_cursor_is_not_historical(self):
+        self.state()
+        with (self.root / "last_seen").open("a") as stream:
+            stream.write(" inflight=10,12\n")
+        rc, out = self.call()
+        self.assertEqual(rc, 0)
+        self.assertIn("reported_unconfirmed [10, 12]", out)
+        self.assertIn("historical_unknown -", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
